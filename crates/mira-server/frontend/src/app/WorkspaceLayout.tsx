@@ -66,6 +66,10 @@ export function WorkspaceLayout(context: WorkspaceRuntime) {
         setMainView('chat');
         await onNewChat();
       }}
+      onSearch={() => {
+        closeDrawer();
+        setPaletteOpen(true);
+      }}
       onOpenSettings={() => {
         closeDrawer();
         openSettings();
@@ -127,11 +131,6 @@ export function WorkspaceLayout(context: WorkspaceRuntime) {
           lights={lights}
           sidebarOpen={sidebarOpen}
           onToggleSidebar={toggleSidebar}
-          onNewChat={() => {
-            setMainView('chat');
-            void onNewChat();
-          }}
-          onSearch={() => setPaletteOpen(true)}
           keybindings={keybindings}
         />
       )}

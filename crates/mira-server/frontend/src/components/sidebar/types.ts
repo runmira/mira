@@ -24,6 +24,8 @@ export type Props = {
   /** Switch the main pane to a different primary view. */
   onNavigate: (view: MainView) => void;
   onNewChat: () => void;
+  /** Opens the command palette, which finds chats too. */
+  onSearch: () => void;
   onOpenSettings: () => void;
   onOpenPicker: () => void;
   onSessionLoaded: () => void;

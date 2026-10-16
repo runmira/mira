@@ -339,6 +339,8 @@ const COMMAND_LABELS: Record<MiraKeybindingCommand, string> = {
   'approval.reject': 'Reject request',
   'review.toggle': 'Review changes',
   'sidebar.toggle': 'Toggle sidebar',
+  'navigation.back': 'Go back',
+  'navigation.forward': 'Go forward',
   'settings.toggle': 'Open Settings',
   'palette.toggle': 'Command palette',
 };

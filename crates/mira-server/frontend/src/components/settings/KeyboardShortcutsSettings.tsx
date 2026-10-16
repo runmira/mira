@@ -28,6 +28,8 @@ const descriptions: Partial<Record<MiraKeybindingCommand,string>>={
  'panel.close':'Close the right side panel.',
  'terminal.toggle':'Show or hide the terminal.',
  'sidebar.toggle':'Show or hide your chats and projects.',
+ 'navigation.back':'Return to the previous chat or page.',
+ 'navigation.forward':'Go forward again after going back.',
  'review.toggle':'Show or hide the changes review.',
  'palette.toggle':'Search actions, chats, and settings.',
  'settings.toggle':'Open or leave Settings.',

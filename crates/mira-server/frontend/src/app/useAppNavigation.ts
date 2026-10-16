@@ -25,6 +25,9 @@ export function useAppNavigation() {
   const setMainView: Dispatch<SetStateAction<MainView>> = useCallback(
     (value) => {
       const next = typeof value === 'function' ? value(current.current.mainView) : value;
+      // Already there: keep the URL (a chat's or work item's own), and add
+      // no history entry, so Back doesn't step through the same view.
+      if (next === current.current.mainView) return;
       if (next === 'settings' && current.current.mainView !== 'settings')
         returnTo.current = current.current.mainView;
       // Update immediately so two navigation commands in the same event compose.

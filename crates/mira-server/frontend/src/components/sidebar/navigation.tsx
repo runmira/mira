@@ -1,7 +1,9 @@
 import { useFileIcons } from '@/lib/fileIcons';
 import { cn } from '@/lib/utils';
-import { ChevronDown, ChevronRight, Folder } from 'lucide-react';
-/** A collapsible shelf's heading: Recents, Settled, Archived. */
+import { Folder } from 'lucide-react';
+/** A collapsible shelf's heading: Recents, Settled, Archived. No chevron:
+ *  its icon sits in the same column as every other row's, and the whole
+ *  heading toggles. */
 export function ShelfHeader({
   icon,
   label,
@@ -20,14 +22,9 @@ export function ShelfHeader({
       type="button"
       onClick={onToggle}
       aria-expanded={open}
-      className="flex items-center gap-1.5 rounded-md px-2 py-1 text-[11.5px] font-semibold uppercase tracking-wider text-muted-foreground/80 transition-colors hover:bg-fg/[0.05] hover:text-foreground"
+      className="flex items-center gap-2.5 rounded-md px-2.5 py-1 text-[11.5px] font-semibold uppercase tracking-wider text-muted-foreground/80 transition-colors hover:bg-fg/[0.05] hover:text-foreground"
     >
-      {open ? (
-        <ChevronDown className="size-3 shrink-0 text-muted-foreground/60" />
-      ) : (
-        <ChevronRight className="size-3 shrink-0 text-muted-foreground/60" />
-      )}
-      {icon}
+      <span className="flex size-3.5 shrink-0 items-center justify-center">{icon}</span>
       {label}
       {count != null && count > 0 && (
         <span className="rounded-full bg-secondary/80 px-1.5 text-[10.5px] font-medium normal-case tracking-normal text-muted-foreground">

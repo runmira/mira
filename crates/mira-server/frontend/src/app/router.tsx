@@ -18,7 +18,7 @@ const router = createHashRouter([
     ),
     children: [
       { index: true, element: <Navigate to="/chat" replace /> },
-      ...['chat', 'work', 'work/:key', 'plugins', 'pull-request', 'scheduled'].map((path) => ({ path, element: null })),
+      ...['chat', 'chat/:sessionId', 'work', 'work/:key', 'plugins', 'pull-request', 'scheduled'].map((path) => ({ path, element: null })),
       settingsRoute,
       { path: '*', element: <Navigate to="/chat" replace /> },
     ],

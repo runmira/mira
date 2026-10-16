@@ -189,7 +189,7 @@ export function SessionRow({
         else onPick();
       }}
       className={cn(
-        'group grid w-full cursor-pointer items-center gap-1.5 rounded-lg px-2 py-1.5 transition-colors',
+        'group grid w-full cursor-pointer items-center gap-1.5 rounded-lg py-1.5 pl-2.5 pr-2 transition-colors',
         selecting ? 'grid-cols-[auto_1fr_auto] cursor-pointer' : 'grid-cols-[1fr_auto]',
         selecting && checked
           ? 'sidebar-active bg-fg/[0.1] text-foreground'
@@ -207,7 +207,7 @@ export function SessionRow({
       )}
       {/* Keep the title and git indicator on the first row, with
        *  secondary context and the timestamp aligned below. */}
-      <span className="grid min-w-0 grid-cols-[16px_minmax(0,1fr)_auto] items-center gap-2 text-left">
+      <span className="grid min-w-0 grid-cols-[14px_minmax(0,1fr)_auto] items-center gap-2.5 text-left">
         {selecting ? (
           <span />
         ) : depth > 0 && !launched ? (
@@ -356,7 +356,7 @@ export function SessionRow({
 export function EngineBadge({ session }: { session: SessionSummary }) {
   if (session.agent_driver) {
     return (
-      <span title={`Runs on ${agentName(session.agent_driver)}`} className="flex shrink-0">
+      <span title={`Runs on ${agentName(session.agent_driver)}`} className="flex size-3.5 shrink-0 items-center justify-center">
         <AgentIcon
           kind={session.agent_driver}
           name={agentName(session.agent_driver)}
@@ -367,7 +367,7 @@ export function EngineBadge({ session }: { session: SessionSummary }) {
     );
   }
   return (
-    <span title={session.model || 'Mira provider'} className="flex shrink-0">
+    <span title={session.model || 'Mira provider'} className="flex size-3.5 shrink-0 items-center justify-center">
       <ModelIcon model={session.model} size="xs" />
     </span>
   );
@@ -536,7 +536,7 @@ export function ArchivedRow({
   return (
     <div
       className={cn(
-        'group grid w-full grid-cols-[1fr_auto] items-center gap-1.5 rounded-lg px-2 py-1.5 transition-colors',
+        'group grid w-full grid-cols-[1fr_auto] items-center gap-1.5 rounded-lg py-1.5 pl-2.5 pr-2 transition-colors',
         active
           ? 'sidebar-active bg-fg/[0.1] text-foreground'
           : 'text-foreground/70 hover:bg-fg/[0.05] hover:text-foreground',
@@ -545,7 +545,7 @@ export function ArchivedRow({
       <button
         type="button"
         onClick={onOpen}
-        className="grid min-w-0 grid-cols-[16px_minmax(0,1fr)_16px_24px] items-center gap-2 text-left"
+        className="grid min-w-0 grid-cols-[14px_minmax(0,1fr)_16px_24px] items-center gap-2.5 text-left"
         title="Open"
       >
         <EngineBadge session={session} />

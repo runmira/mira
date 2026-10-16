@@ -6,8 +6,6 @@ import {
   Archive,
   ArrowLeft,
   CheckCheck,
-  ChevronDown,
-  ChevronRight,
   CircleAlert,
   Folder,
   GitBranch,
@@ -50,6 +48,7 @@ export function Sidebar(props: Props) {
     activeView,
     onNavigate,
     onNewChat,
+    onSearch,
     onOpenSettings,
     onSetBackgroundMode,
     activePr,
@@ -327,14 +326,14 @@ export function Sidebar(props: Props) {
                 </div>
               </div>
             )}
-            {/* The desktop app has New thread beside the traffic lights. */}
-            {!hiddenTitleBar && (
-              <div className="relative z-30 shrink-0 bg-panel px-2 pb-1">
-                <NavItem icon={<PenLine className="size-3.5" />} onClick={onNewChat}>
-                  New thread
-                </NavItem>
-              </div>
-            )}
+            <div className={cn('relative z-30 flex shrink-0 flex-col gap-0.5 px-2 pb-1', !hiddenTitleBar && 'bg-panel')}>
+              <NavItem icon={<PenLine className="size-3.5" />} onClick={onNewChat}>
+                New thread
+              </NavItem>
+              <NavItem icon={<Search className="size-3.5" />} onClick={onSearch}>
+                Search
+              </NavItem>
+            </div>
             <div
               ref={scrollRef}
               onScroll={(e) => {
@@ -388,13 +387,13 @@ export function Sidebar(props: Props) {
                     onToggle={() => toggleShelf(RECENTS_OPEN_KEY, setRecentsOpen)}
                   />
                   <Collapse open={recentsOpen}>
-                    <div className="flex flex-col gap-0.5 pl-1">
+                    <div className="flex flex-col gap-0.5">
                       {recents.map((s) => flatRow(s, 'recent', basename(s.cwd)))}
                       {recentsOverflow && (
                         <button
                           type="button"
                           onClick={toggleRecentsMore}
-                          className="px-2 py-1 text-left text-[12.5px] text-muted-foreground/80 transition-colors hover:text-foreground"
+                          className="py-1 pl-[34px] pr-2 text-left text-[12.5px] text-muted-foreground/80 transition-colors hover:text-foreground"
                         >
                           {recentsMore ? 'Show less' : 'Show more'}
                         </button>
@@ -504,20 +503,15 @@ export function Sidebar(props: Props) {
                   return (
                     <div key={g.cwd} className="flex flex-col">
                       <div
-                        className="group flex items-center gap-1.5 rounded-md px-2 py-1 text-[14.5px] font-semibold text-foreground/90 transition-colors hover:bg-fg/[0.05] hover:text-foreground"
+                        className="group flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[14.5px] font-semibold text-foreground/90 transition-colors hover:bg-fg/[0.05] hover:text-foreground"
                         title={g.cwd}
                       >
                         <button
                           type="button"
                           onClick={() => toggleCollapsed(g.cwd)}
                           aria-expanded={!isCollapsed}
-                          className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+                          className="flex min-w-0 flex-1 items-center gap-2.5 text-left"
                         >
-                          {isCollapsed ? (
-                            <ChevronRight className="size-3 shrink-0 text-muted-foreground/60" />
-                          ) : (
-                            <ChevronDown className="size-3 shrink-0 text-muted-foreground/60" />
-                          )}
                           <SidebarFolderIcon
                             name={g.label}
                             open={!isCollapsed}
@@ -551,7 +545,7 @@ export function Sidebar(props: Props) {
                       </div>
 
                       <Collapse open={!isCollapsed}>
-                        <div className="flex flex-col gap-0.5 pl-1">
+                        <div className="flex flex-col gap-0.5">
                           {visible.map((root, rootIndex) => {
                             const section = dateSection(root.session);
                             const header =
@@ -634,7 +628,7 @@ export function Sidebar(props: Props) {
                           {overflow > 0 && (
                             <button
                               onClick={() => toggleShowMore(g.cwd)}
-                              className="px-2 py-1 text-left text-[12.5px] text-muted-foreground/80 transition-colors hover:text-foreground"
+                              className="py-1 pl-[34px] pr-2 text-left text-[12.5px] text-muted-foreground/80 transition-colors hover:text-foreground"
                             >
                               Show {overflow} more
                             </button>
@@ -642,7 +636,7 @@ export function Sidebar(props: Props) {
                           {expandedAll && g.sessions.length > PER_GROUP_LIMIT && (
                             <button
                               onClick={() => toggleShowMore(g.cwd)}
-                              className="px-2 py-1 text-left text-[12.5px] text-muted-foreground/80 transition-colors hover:text-foreground"
+                              className="py-1 pl-[34px] pr-2 text-left text-[12.5px] text-muted-foreground/80 transition-colors hover:text-foreground"
                             >
                               Show less
                             </button>
@@ -657,7 +651,7 @@ export function Sidebar(props: Props) {
               or the user put them away. Out of the folders, still a click
               away; writing to one brings it back. */}
                 {!searching && settled.length > 0 && (
-                  <div className="mt-4 flex flex-col gap-0.5 px-0.5">
+                  <div className="mt-4 flex flex-col gap-0.5">
                     <ShelfHeader
                       icon={<CheckCheck className="size-3 shrink-0" />}
                       label="Settled"
@@ -666,7 +660,7 @@ export function Sidebar(props: Props) {
                       onToggle={() => toggleShelf(SETTLED_OPEN_KEY, setSettledOpen)}
                     />
                     <Collapse open={settledOpen}>
-                      <div className="flex flex-col gap-0.5 pl-1">
+                      <div className="flex flex-col gap-0.5">
                         {settled.slice(0, settledShown).map((s, i, rows) => (
                           <div key={s.id}>
                             {(i === 0 || settledPeriod(s) !== settledPeriod(rows[i - 1])) && (
@@ -680,7 +674,7 @@ export function Sidebar(props: Props) {
                         {settled.length > settledShown && (
                           <button
                             onClick={() => setSettledShown((n) => n + SETTLED_PAGE * 2)}
-                            className="px-2 py-1 text-left text-[12.5px] text-muted-foreground/80 transition-colors hover:text-foreground"
+                            className="py-1 pl-[34px] pr-2 text-left text-[12.5px] text-muted-foreground/80 transition-colors hover:text-foreground"
                           >
                             Show {Math.min(settled.length - settledShown, SETTLED_PAGE * 2)} more
                           </button>
@@ -694,7 +688,7 @@ export function Sidebar(props: Props) {
               list live here. Clicking a row opens it; Restore puts it back
               in its folder; Delete is permanent. */}
                 {!selecting && !searching && (
-                  <div className="mt-4 flex flex-col gap-0.5 px-0.5">
+                  <div className="mt-4 flex flex-col gap-0.5">
                     <ShelfHeader
                       icon={<Archive className="size-3 shrink-0" />}
                       label="Archived"
@@ -712,7 +706,7 @@ export function Sidebar(props: Props) {
                       />
                     )}
                     {showArchived && (
-                      <div className="flex flex-col gap-0.5 pl-1">
+                      <div className="flex flex-col gap-0.5">
                         {archived === null && !archivedError && <Empty>Loading…</Empty>}
                         {archived !== null &&
                           archived.length === 0 &&

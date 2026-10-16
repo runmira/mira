@@ -155,6 +155,7 @@ function Preview() {
           activeView={view}
           onNavigate={setView}
           onNewChat={() => {}}
+          onSearch={() => {}}
           onOpenSettings={() => {}}
           onOpenPicker={() => {}}
           onSessionLoaded={() => {}}

@@ -66,6 +66,8 @@ export const MIRA_KEYBINDING_COMMANDS = [
   'approval.reject',
   'review.toggle',
   'sidebar.toggle',
+  'navigation.back',
+  'navigation.forward',
   'settings.toggle',
   'palette.toggle',
 ] as const;
@@ -423,6 +425,8 @@ export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
   { key: 'n', command: 'approval.reject', when: 'approvalOpen && !editableFocus' },
   { key: 'mod+d', command: 'review.toggle', when: '!terminalFocus' },
   { key: 'mod+b', command: 'sidebar.toggle', when: '!terminalFocus' },
+  { key: 'mod+[', command: 'navigation.back', when: '!terminalFocus' },
+  { key: 'mod+]', command: 'navigation.forward', when: '!terminalFocus' },
   { key: 'mod+,', command: 'settings.toggle', when: '!terminalFocus' },
   { key: 'mod+k', command: 'palette.toggle', when: '!terminalFocus' },
 ];

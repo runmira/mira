@@ -220,6 +220,7 @@ function Preview() {
           activeView={view}
           onNavigate={(next) => void navigate(`/${next}`)}
           onNewChat={() => {}}
+          onSearch={() => {}}
           onOpenSettings={() => {}}
           onOpenPicker={() => {}}
           onSessionLoaded={() => {}}

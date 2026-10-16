@@ -4,6 +4,7 @@ import { useAgentEvents } from './useAgentEvents';
 import { useApprovalCommands } from './useApprovalCommands';
 import { useApprovalEvents } from './useApprovalEvents';
 import { useCommandBridge } from './useCommandBridge';
+import { useChatRoute, useLayoutHistory } from './useHistoryNavigation';
 import { useComposerCommands } from './useComposerCommands';
 import { useNoticeEvents } from './useNoticeEvents';
 import { usePanelCommands } from './usePanelCommands';
@@ -169,5 +170,7 @@ export function Application() {
     handleMessage,
   });
   useWorkspaceEffects(runtime);
+  useChatRoute(state.mainView, state.sessionId, sessionCommands.attachSession);
+  useLayoutHistory();
   return <WorkspaceLayout {...runtime} />;
 }

@@ -13,6 +13,7 @@ import { titleFromEntries,type MsgEntry } from '../transcript/entries';
 import type { AcpAgentStatus } from '../types';
 import { connect } from '../ws';
 
+import { useHistoryArrows } from './useHistoryNavigation';
 import type { WorkspaceRuntime } from './WorkspaceRuntime';
 export function useWorkspaceEffects(
   context: Pick<
@@ -153,6 +154,7 @@ export function useWorkspaceEffects(
     browserPingSeen,
     browserShownFor,
   } = context;
+  const { goBack, goForward } = useHistoryArrows();
 
   // Preload the remote price table so Usage shows dollars from the same
   // authoritative rows the server renders, and prime audio playback on the
@@ -602,6 +604,14 @@ export function useWorkspaceEffects(
         case 'sidebar.toggle':
           e.preventDefault();
           toggleSidebar();
+          break;
+        case 'navigation.back':
+          e.preventDefault();
+          goBack();
+          break;
+        case 'navigation.forward':
+          e.preventDefault();
+          goForward();
           break;
         case 'settings.toggle':
           e.preventDefault();

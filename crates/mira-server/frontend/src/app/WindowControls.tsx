@@ -1,4 +1,4 @@
-import { PanelLeft, Search, SquarePen } from 'lucide-react';
+import { ArrowLeft, ArrowRight, PanelLeft } from 'lucide-react';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { TRAFFIC_LIGHT_INSET } from '../lib/desktop';
 import {
@@ -7,6 +7,7 @@ import {
   type ResolvedKeybindingsConfig,
 } from '../lib/keybindings';
 import { cn } from '../lib/utils';
+import { useHistoryArrows } from './useHistoryNavigation';
 
 /** Height of the strip the traffic lights sit in. The sidebar's own header
  *  row is the same height. */
@@ -22,8 +23,8 @@ const controlsRight = (lights: boolean) => controlsLeft(lights) + BUTTONS * BUTT
 
 /**
  * The desktop app's window controls, pinned beside the macOS traffic lights
- * the way a native Mac app does it: the sidebar toggle, a new thread, and
- * search (the command palette, which finds chats too).
+ * the way a native Mac app does it: the sidebar toggle, then Back and
+ * Forward through the chats and pages visited (see `useHistoryArrows`).
  *
  * They stay put whatever the main pane shows — chat, Settings, plugins —
  * and whether the sidebar is open or not, so there is always one place to
@@ -35,16 +36,12 @@ export function WindowControls({
   lights,
   sidebarOpen,
   onToggleSidebar,
-  onNewChat,
-  onSearch,
   keybindings,
 }: {
   /** The traffic lights are showing (not fullscreen). */
   lights: boolean;
   sidebarOpen: boolean;
   onToggleSidebar: () => void;
-  onNewChat: () => void;
-  onSearch: () => void;
   keybindings: ResolvedKeybindingsConfig;
 }) {
   const [hint, setHint] = useState<{ label: string; shortcut: string | null } | null>(null);
@@ -59,12 +56,14 @@ export function WindowControls({
     setHint(null);
   };
   useEffect(() => () => window.clearTimeout(hintTimer.current), []);
+  const { canGoBack, canGoForward, goBack, goForward } = useHistoryArrows();
   const controls: {
     label: string;
     icon: React.ReactNode;
     command: MiraKeybindingCommand;
     onClick: () => void;
     expanded?: boolean;
+    disabled?: boolean;
   }[] = [
     {
       label: sidebarOpen ? 'Hide sidebar' : 'Show sidebar',
@@ -74,16 +73,18 @@ export function WindowControls({
       expanded: sidebarOpen,
     },
     {
-      label: 'New thread',
-      icon: <SquarePen className="size-[15px]" strokeWidth={1.75} />,
-      command: 'chat.new',
-      onClick: onNewChat,
+      label: 'Back',
+      icon: <ArrowLeft className="size-4" strokeWidth={1.75} />,
+      command: 'navigation.back',
+      onClick: goBack,
+      disabled: !canGoBack,
     },
     {
-      label: 'Search',
-      icon: <Search className="size-[15px]" strokeWidth={1.75} />,
-      command: 'palette.toggle',
-      onClick: onSearch,
+      label: 'Forward',
+      icon: <ArrowRight className="size-4" strokeWidth={1.75} />,
+      command: 'navigation.forward',
+      onClick: goForward,
+      disabled: !canGoForward,
     },
   ];
   return (
@@ -104,10 +105,11 @@ export function WindowControls({
             }}
             aria-label={c.label}
             aria-expanded={c.expanded}
+            disabled={c.disabled}
             onPointerEnter={() => showHint({ label: c.label, shortcut: shortcutLabelForCommand(keybindings, c.command) })}
             onPointerLeave={hideHint}
             onBlur={hideHint}
-            className="pointer-events-auto flex shrink-0 items-center justify-center rounded-md text-foreground/60 transition-colors hover:bg-fg/[0.07] hover:text-foreground"
+            className="pointer-events-auto flex shrink-0 items-center justify-center rounded-md text-foreground/60 transition-colors enabled:hover:bg-fg/[0.07] enabled:hover:text-foreground disabled:text-foreground/25"
             style={{ width: BUTTON, height: BUTTON }}
           >
             {c.icon}
