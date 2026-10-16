@@ -13,8 +13,10 @@ import {
   SquareArrowOutUpRight,
   Users,
 } from 'lucide-react';
-import { useEffect, useState } from 'react';
-import { getPullRequest, type PullRequestDetailView } from '../../api';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import type { PullRequestDetailView, PullRequestSummary } from '../../api';
+import { detailFromSummary, invalidatePr, prQueries } from '../../state/pullRequests/queries';
+import { useOptionalRuntime } from '../../state/RuntimeProvider';
 import { Markdown } from '../Markdown';
 import { ActivityFeed, CommentBox, MergeMenu, ReviewMenu } from './ActivityFeed';
 import { CodePane } from './CodePane';
@@ -31,8 +33,11 @@ export function PullRequestDetail({
   onMutation,
   onReviewPr,
   hideExpand = false,
+  summary,
 }: {
   selection: Selection;
+  /** The list's row for this PR: the header paints from it at once. */
+  summary?: PullRequestSummary;
   pane: 'summary' | 'code';
   onPane: (p: 'summary' | 'code') => void;
   expanded: boolean;
@@ -43,27 +48,20 @@ export function PullRequestDetail({
    *  expand button is hidden. */
   hideExpand?: boolean;
 }) {
-  const [detail, setDetail] = useState<PullRequestDetailView | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [reloadTick, setReloadTick] = useState(0);
-
-  useEffect(() => {
-    setLoading(true);
-    getPullRequest(selection.owner, selection.repo, selection.number)
-      .then((v) => {
-        setDetail(v);
-        setError(null);
-      })
-      .catch((e) => {
-        setDetail(null);
-        setError(String((e as Error).message));
-      })
-      .finally(() => setLoading(false));
-  }, [selection.owner, selection.repo, selection.number, reloadTick]);
+  const runtime = useOptionalRuntime();
+  const client = useQueryClient();
+  const ref = { owner: selection.owner, repo: selection.repo, number: selection.number };
+  const query = useQuery({
+    ...prQueries.detail(runtime, ref),
+    placeholderData: summary ? detailFromSummary(summary) : undefined,
+  });
+  const detail: PullRequestDetailView | null = query.data ?? null;
+  // Still only the list's row: the header can show, the body can't yet.
+  const loading = query.isPending || query.isPlaceholderData;
+  const error = query.error?.message ?? null;
 
   function reload() {
-    setReloadTick((n) => n + 1);
+    void invalidatePr(client, runtime, ref);
     onMutation();
   }
 

@@ -6,29 +6,22 @@ import { pullRequestPatch } from '../../lib/pullRequestDiff';
 import { GuidedWalkthrough } from '../GuidedWalkthrough';
 import { cn } from '@/lib/utils';
 import { ChevronDown, Code as CodeIcon, LoaderCircle } from 'lucide-react';
+import { useQuery } from '@tanstack/react-query';
 import { useEffect, useMemo, useState } from 'react';
-import { getPullRequestFiles, type FileChangeView } from '../../api';
+import type { FileChangeView } from '../../api';
+import { prQueries } from '../../state/pullRequests/queries';
+import { useOptionalRuntime } from '../../state/RuntimeProvider';
 import { Selection } from './types';
 /* ---------- code pane (Files changed) ---------- */
 
 export function CodePane({ selection }: { selection: Selection }) {
   const [guided, setGuided] = useState(false);
-  const [files, setFiles] = useState<FileChangeView[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true); setFiles(null); setError(null); setGuided(false);
-    getPullRequestFiles(selection.owner, selection.repo, selection.number)
-      .then((v) => {
-        if (cancelled) return;
-        setFiles(v.files);
-        setError(null);
-      })
-      .catch((e) => { if (!cancelled) setError(String((e as Error).message)); })
-      .finally(() => { if (!cancelled) setLoading(false); });
-    return () => { cancelled = true; };
-  }, [selection.owner, selection.repo, selection.number]);
+  const runtime = useOptionalRuntime();
+  const query = useQuery(prQueries.files(runtime, selection));
+  const files: FileChangeView[] | null = query.data?.files ?? null;
+  const loading = query.isPending;
+  const error = query.error?.message ?? null;
+  useEffect(() => setGuided(false), [selection.owner, selection.repo, selection.number]);
 
   if (guided) return <GuidedWalkthrough key={`${selection.owner}/${selection.repo}/${selection.number}`} initialSource={{ kind: 'pr', owner: selection.owner, repo: selection.repo, number: selection.number }} onChanged={() => {}} onClose={() => setGuided(false)} />;
 

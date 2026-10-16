@@ -1,7 +1,8 @@
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useLocation, useNavigate } from 'react-router';
-import { workKeyFromPath, workPath } from '../../lib/workItems';
+import { prRef, workKeyFromPath, workPath } from '../../lib/workItems';
+import { usePrefetchPr } from '../../state/pullRequests/queries';
 import { useAppRuntime } from '../../state/RuntimeProvider';
 import { useStartWork, useWorkItems, workQueries } from '../../state/work/workData';
 import { useDebounced } from '../composer/IssuePalette';
@@ -15,12 +16,17 @@ export function WorkSidebarView({ sessionId, onOpenChat }: { sessionId: string; 
   const { pathname } = useLocation();
   const navigate = useNavigate();
   const [starting, setStarting] = useState(false);
+  const prefetch = usePrefetchPr();
   return (
     <>
       <WorkSidebar
         items={items}
         activeKey={workKeyFromPath(pathname)}
         onPick={(key) => void navigate(workPath(key))}
+        onIntent={(item) => {
+          const ref = item.pr && prRef(item.pr);
+          if (ref) prefetch(ref);
+        }}
         onStartWork={() => setStarting(true)}
       />
       {starting && <StartWorkView sessionId={sessionId} onClose={() => setStarting(false)} onOpened={onOpenChat} />}
