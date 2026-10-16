@@ -100,6 +100,7 @@ export function UrlCapsule({ url, icon, live, onNavigate }: {
         onKeyDown={(e) => {
           if (e.key === 'Escape') (e.target as HTMLInputElement).blur();
         }}
+        aria-label="Browser address"
         placeholder="Search or enter address"
         spellCheck={false}
         className={cn(

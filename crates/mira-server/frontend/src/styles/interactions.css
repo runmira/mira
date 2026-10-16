@@ -532,3 +532,9 @@
 @media (prefers-reduced-motion: reduce) {
   .agent-cursor-press, .agent-cursor-ripple, .agent-cursor-glow, .annotation-pin { animation: none; }
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-cursor { transition: none; }
+}
+.reduce-motion .agent-cursor { transition: none; }
+.reduce-motion .agent-cursor-press, .reduce-motion .agent-cursor-ripple, .reduce-motion .agent-cursor-glow, .reduce-motion .annotation-pin { animation: none; }

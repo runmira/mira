@@ -7,14 +7,12 @@ import { lazyNamed } from '../lib/lazy';
 import { LazyBoundary } from './LazyBoundary';
 import { ComposerNoticeStack } from './ComposerNoticeStack';
 import { EnginePicker } from './EnginePicker';
-import { RevertDialog } from './AgentSessionActions';
 import { FilePicker } from './FilePicker';
 import { IssuePalette } from './composer/IssuePalette';
 import { RequestBoundary } from './RequestBoundary';
 
 import { ImageAttachmentMeta } from './ImageAttachmentDetails';
 import { ImageLightbox } from './ImageLightbox';
-import { BrowserNoteCard } from './BrowserNoteCard';
 import { MentionInput } from './MentionInput';
 import { QuoteCard } from './QuoteCard';
 import {
@@ -34,6 +32,8 @@ import { AttachmentChip } from './composer/attachments';
 import { Props } from './composer/types';
 import { useComposerController } from './composer/useComposerController';
 import { HoverCard } from './ui/hover-card';
+const RevertDialog = lazyNamed(() => import('./AgentSessionActions'), 'RevertDialog');
+const BrowserNoteCard = lazyNamed(() => import('./BrowserNoteCard'), 'BrowserNoteCard');
 const SpendLimitNotice = lazyNamed(() => import('./SpendLimitNotice'), 'SpendLimitNotice');
 export function Composer(props: Props) {
   const {
@@ -106,7 +106,7 @@ export function Composer(props: Props) {
     setImages,
     quotes,
     setQuotes,
-    notes,
+    notes = [],
     setNotes,
     attachments,
     attachError,
@@ -154,11 +154,11 @@ export function Composer(props: Props) {
     revertOpen,
     setRevertOpen,
   } = useComposerController(props);
-  const unsupportedImages = agentDriving && images.length > 0 && !agentAcceptsImages(agentConfig);
+  const unsupportedImages = agentDriving && (images.length > 0 || notes.length > 0) && !agentAcceptsImages(agentConfig);
   return (
     <div className="flex flex-col items-center gap-1.5 px-4 pb-4 pt-2 max-md:px-2 max-md:pb-2">
       <LazyBoundary fallback={null}><SpendLimitNotice key={sessionId ?? 'unsaved'} sessionId={sessionId} busy={busy} /></LazyBoundary>
-      <RevertDialog sessionId={sessionId} open={revertOpen} onOpenChange={setRevertOpen} onReverted={onAgentReverted} />
+      {revertOpen && <LazyBoundary fallback={null}><RevertDialog sessionId={sessionId} open={revertOpen} onOpenChange={setRevertOpen} onReverted={onAgentReverted} /></LazyBoundary>}
       {draftError && (
         <p
           role="alert"
@@ -277,6 +277,7 @@ export function Composer(props: Props) {
 
         {!activePromptKind && notes.length > 0 && (
           <div className="flex flex-col gap-1.5 px-1.5 pt-1">
+            <LazyBoundary fallback={null}>
             {notes.map((n) => (
               <BrowserNoteCard
                 key={n.id}
@@ -285,6 +286,7 @@ export function Composer(props: Props) {
                 onRemove={() => setNotes((prev) => prev.filter((p) => p.id !== n.id))}
               />
             ))}
+            </LazyBoundary>
           </div>
         )}
 

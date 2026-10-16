@@ -1,5 +1,5 @@
 import { X } from 'lucide-react';
-import type { ComposerNote } from '@/lib/attachBridge';
+import type { BrowserDraftNote } from '../lib/richComposerDrafts';
 
 function host(url: string) {
   try {
@@ -16,7 +16,7 @@ function host(url: string) {
  * screenshot.
  */
 export function BrowserNoteCard({ note, onOpen, onRemove }: {
-  note: ComposerNote;
+  note: BrowserDraftNote;
   onOpen: () => void;
   onRemove: () => void;
 }) {

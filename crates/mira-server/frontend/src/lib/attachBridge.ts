@@ -58,6 +58,8 @@ export const COMPOSE_NOTE_EVENT = 'mira:compose-note';
  *  waiting in the composer as a card. On send it becomes a line of text and
  *  its marked screenshot. */
 export type ComposerNote = {
+  /** Captured draft owner, so async rendering cannot move a note to another chat. */
+  owner?: string;
   id: string;
   url: string;
   /** What's under the mark, in words: `the "Sign in" button`. */

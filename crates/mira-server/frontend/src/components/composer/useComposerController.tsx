@@ -15,7 +15,7 @@ import { mapPosturesToModes,MIRA_MODE_TO_POSTURE } from '../../lib/agentPostures
 import { useIsPhone } from '../../lib/mobile';
 import { PREF_KEYS,useBoolPref } from '../../lib/prefs';
 import {
-type RichDraft
+type BrowserDraftNote, type RichDraft
 } from '../../lib/richComposerDrafts';
 import { forkActions } from '../../lib/agentFork';
 import { useAppRuntime } from '../../state/RuntimeProvider';
@@ -23,7 +23,7 @@ import type { Mode } from '../../types';
 import { type ComposerNotice } from '../ComposerNoticeStack';
 import { type MentionInputHandle } from '../MentionInput';
 import { quoteMarkdown } from '../QuoteCard';
-import { notesMarkdown } from '../../lib/browserAnnotation';
+import { notesMarkdown } from '../../lib/browserNotes';
 import {
 customToCommand,
 filterCommands,
@@ -633,18 +633,24 @@ export function useComposerController({
 
   // Browser notes wait as cards too. Their screenshot is read into an
   // image attachment on arrival, so sending stays synchronous.
-  const [notes, setNotes] = useState<(ComposerNote & { data: ImageData })[]>([]);
+  const notes = richDraft.notes ?? [];
+  function setNotes(value: BrowserDraftNote[] | ((previous: BrowserDraftNote[]) => BrowserDraftNote[]), owner = textOwner.current) {
+    const previous = runtime.drafts.get(owner);
+    runtime.drafts.update(owner, { ...previous, notes: typeof value === 'function' ? value(previous.notes ?? []) : value }, true);
+  }
 
   useEffect(() => {
     async function onNote(e: Event) {
       const note = (e as CustomEvent<ComposerNote>).detail;
       if (!note?.comment) return;
+      const owner = note.owner ?? textOwner.current;
       try {
         const data = await readImage(note.image);
-        setNotes((prev) => [...prev, { ...note, data }]);
-        requestAnimationFrame(() => mentionRef.current?.focus());
+        const { image: _image, ...metadata } = note;
+        setNotes((prev) => [...prev, { ...metadata, data }], owner);
+        if (textOwner.current === owner) requestAnimationFrame(() => mentionRef.current?.focus());
       } catch (err) {
-        setAttachError(`couldn't add the browser note: ${(err as Error).message}`);
+        if (textOwner.current === owner) setAttachError(`couldn't add the browser note: ${(err as Error).message}`);
       }
     }
     window.addEventListener(COMPOSE_NOTE_EVENT, onNote);

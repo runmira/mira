@@ -1,3 +1,4 @@
+import { useAppRuntime } from '../../state/RuntimeProvider';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { ArrowUp, LoaderCircle, MessageSquare } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -60,7 +61,7 @@ export function AgentCursor({ pointer, w, h }: { pointer: AgentPointer | null; w
   return (
     <div
       aria-hidden
-      className="pointer-events-none absolute left-0 top-0 z-20 transition-[left,top,opacity] duration-[420ms] ease-[cubic-bezier(0.22,1,0.36,1)]"
+      className="agent-cursor pointer-events-none absolute left-0 top-0 z-20 transition-[left,top,opacity] duration-[420ms] ease-[cubic-bezier(0.22,1,0.36,1)]"
       style={{ left: `${(pointer.x / w) * 100}%`, top: `${(pointer.y / h) * 100}%`, opacity: idle ? 0 : 1 }}
     >
       {/* The glow, centred on the tip. */}
@@ -150,6 +151,10 @@ export function AnnotationLayer({ frame, url, onExit, onMark }: {
   const [drag, setDrag] = useState<{ x0: number; y0: number; x: number; y: number; moved: boolean } | null>(null);
   const [comment, setComment] = useState('');
   const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const captured = useRef(frame);
+  const runtime = useAppRuntime();
+  const owner = useRef(runtime.drafts.key(runtime.sessionState.get().active));
   const [passThrough, setPassThrough] = useState(false);
 
   // Space held = use the page; Escape drops the draft, then leaves the mode.
@@ -181,10 +186,12 @@ export function AnnotationLayer({ frame, url, onExit, onMark }: {
     if (!draft || !comment.trim() || sending) return;
     setSending(true);
     try {
-      await annotationToComposer({ src: frame.src, frame, url, mark: draft, comment });
+      await annotationToComposer({ owner: owner.current, src: captured.current.src, frame: captured.current, url, mark: draft, comment });
       setNotes((all) => [...all, { ...draft, comment: comment.trim() }]);
       setDraft(null);
       setComment('');
+    } catch (reason) {
+      setError(`Could not add note: ${reason instanceof Error ? reason.message : String(reason)}`);
     } finally {
       setSending(false);
     }
@@ -212,6 +219,9 @@ export function AnnotationLayer({ frame, url, onExit, onMark }: {
         e.preventDefault();
         e.currentTarget.setPointerCapture(e.pointerId);
         const p = toPage(e);
+        captured.current = frame;
+        owner.current = runtime.drafts.key(runtime.sessionState.get().active);
+        setError(null);
         onMark();
         setDraft(null);
         setComment('');
@@ -224,6 +234,7 @@ export function AnnotationLayer({ frame, url, onExit, onMark }: {
         const far = Math.hypot(((p.x - drag.x0) / frame.w) * r.width, ((p.y - drag.y0) / frame.h) * r.height) > 6;
         setDrag({ ...drag, x: p.x, y: p.y, moved: drag.moved || far });
       }}
+      onPointerCancel={() => setDrag(null)}
       onPointerUp={() => {
         if (!drag) return;
         setDraft(live ?? { x: drag.x0, y: drag.y0 });
@@ -243,6 +254,7 @@ export function AnnotationLayer({ frame, url, onExit, onMark }: {
       ))}
       {draft && <Pin x={draft.x} y={draft.y} w={frame.w} h={frame.h} pop />}
 
+      {error && <div role="alert" className="absolute bottom-2 left-2 right-2 rounded bg-background p-2 text-xs text-destructive">{error}</div>}
       {draft && box && (
         <form
           className="absolute z-20 flex items-center gap-2 rounded-full border border-black/[0.06] bg-white py-1 pl-3.5 pr-1 text-[#1a1a1a] shadow-[0_10px_30px_-6px_rgba(0,0,0,0.28),0_1px_3px_rgba(0,0,0,0.08)] dark:border-white/10 dark:bg-[#2a2a2d] dark:text-white"
@@ -259,6 +271,7 @@ export function AnnotationLayer({ frame, url, onExit, onMark }: {
               e.stopPropagation();
               if (e.key === 'Escape') { setDraft(null); setComment(''); }
             }}
+            aria-label="Annotation comment"
             placeholder="Add a comment..."
             className="min-w-0 flex-1 bg-transparent py-1.5 text-[13px] outline-none placeholder:text-current placeholder:opacity-40"
           />
