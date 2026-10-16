@@ -269,6 +269,20 @@ export function useSessionCommands(
   }
 
   function updateSessionActivity(update: SessionActivityUpdate) {
+    // A chat you're not on started waiting on you: its own request frame
+    // went to nobody, so this is the only way you'd hear of it.
+    if ('waiting' in update && update.waiting && update.session_id !== getSessionId()
+      && !appRuntime.sessionActivity.get().activity?.waiting.has(update.session_id)) {
+      const id = update.session_id;
+      callForAttention('question', activityTitlesRef.current.get(id) ?? `Chat ${id.slice(0, 8)}`, {
+        sessionId: id,
+        whileVisible: true,
+        onOpen: () => {
+          setMainView('chat');
+          attachSession(id);
+        },
+      });
+    }
     const completed = appRuntime.commands.applySessionActivity(update);
     for (const id of completed) {
       const title =

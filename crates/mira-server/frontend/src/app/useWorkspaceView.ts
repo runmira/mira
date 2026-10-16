@@ -83,6 +83,7 @@ export function useWorkspaceView(
     | 'forkAt'
     | 'setLightbox'
     | 'busy'
+    | 'attachSession'
     | 'keybindings'
     | 'onNewChat'
     | 'setPickerOpen'
@@ -165,6 +166,8 @@ export function useWorkspaceView(
     forkAt,
     setLightbox,
     busy,
+    attachSession,
+    setMainView,
     historyOffsetRef,
     sessionDiff,
     secondOpinionSeen,
@@ -512,8 +515,10 @@ export function useWorkspaceView(
       retry: retryMessage,
       // External agents fork natively; only some can stop at a chosen turn.
       fork: forksFromMessage ? forkMessage : null,
+      openChat: (id: string) => { setMainView('chat'); attachSession(id); },
+      stopDelegate: (taskId: string) => wsRef.current?.send({ type: 'delegate_cancel', task_id: taskId }),
     }),
-    [busy, editMessage, restoreMessage, retryMessage, forkMessage, forksFromMessage],
+    [busy, editMessage, restoreMessage, retryMessage, forkMessage, forksFromMessage, attachSession, setMainView, wsRef],
   );
 
   /** Everything ⌘K can do. Each entry runs exactly what its button or

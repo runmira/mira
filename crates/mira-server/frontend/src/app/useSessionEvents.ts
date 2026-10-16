@@ -13,7 +13,8 @@ sealThought,
 upsertRuntimeQuestion,
 type Entry,
 } from '../transcript/entries';
-import { entriesForTranscriptPage,historyToEntries,interleaveReplay } from '../transcript/replay';
+import { entriesForTranscriptPage,historyToEntries,interleaveReplay,settleDeadPrompts } from '../transcript/replay';
+import * as delegatedTasks from '../lib/delegatedTasks';
 import type { ServerMsg } from '../types';
 
 import { useStableCallback } from './shared';
@@ -140,6 +141,7 @@ export function useSessionEvents(
         break;
 
       case 'session_activity':
+      case 'session_waiting':
         updateSessionActivity(msg);
         break;
 
@@ -211,6 +213,7 @@ export function useSessionEvents(
         for (const item of msg.queued_inputs ?? []) appRuntime.effect(() => appRuntime.drafts.confirmDelivery(item.id));
         for (const message of msg.history) if (message.input_id) appRuntime.effect(() => appRuntime.drafts.confirmDelivery(message.input_id!));
         appRuntime.resources.cancelContext();
+        delegatedTasks.applyReady(msg.session_id, msg.delegated_tasks ?? [], msg.parent_id ?? null);
         turnCommands.hydrate(msg.session_id, !!msg.running, msg.runtime_work ?? []);
         appRuntime.reconcileTerminals(!!msg.running, msg.turns);
         if (msg.session_activity) updateSessionActivity({ snapshot: msg.session_activity });
@@ -317,11 +320,11 @@ export function useSessionEvents(
         const resumedWork = (msg.runtime_work ?? []).map(work => ({ ...work, subagent: work.kind === 'subagent'
           ? { name: null, prompt: null, result: null, ...work.subagent, reopen: true } : work.subagent }));
         updateTranscript(
-          (msg.runtime_requests ?? []).reduce(
+          settleDeadPrompts((msg.runtime_requests ?? []).reduce(
             (entries, request) => upsertRuntimeQuestion(entries, request),
             resumedWork.reduce(upsertExternalWork,
               msg.transcript_page ? readyEntries : interleaveReplay(msg.history, msg.previews, msg.agent_transcript ?? [])),
-          ),
+          ), msg.live_request_ids),
         );
         // Seed subagent state from history so the ContextPanel shows agents
         // on session reload (live subagent_started frames don't replay).

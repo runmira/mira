@@ -271,6 +271,18 @@ export function GeneralSection({
             />
           }
         />
+        <TRow
+          title="Continue chats after Mira restarts"
+          description="A chat that was mid-turn when Mira stopped picks up again on its own, checking what was already done first. Off: it waits for you to press Continue."
+          control={
+            <TSwitch
+              checked={sessionsCfg?.resume_after_restart ?? true}
+              onChange={(v) => setSessionsFlag('resume_after_restart', v)}
+              label="Continue chats after Mira restarts"
+              disabled={!settings.data}
+            />
+          }
+        />
         {sessionsLoadFailed && (
           <p className="px-1 text-[12px] text-destructive">
             Couldn't load these settings ({settings.error?.message ?? 'request failed'}). They'll apply once loading succeeds — nothing here was turned off.

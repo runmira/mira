@@ -46,7 +46,10 @@ import { ToolCard } from '../ToolCard';
 import { PlanCard } from '../PlanCard';
 import { AskUserCard, type AskUserDecision } from '../AskUserCard';
 import { AgentCard } from '../AgentCard';
-import { DelegateCard, isDelegateTaskName } from '../DelegateCard';
+import { DelegateCard, isDelegateTaskName, taskForCall } from '../DelegateCard';
+import { useSelector } from '@tanstack/react-store';
+import { useDelegatedTasks } from '../../lib/delegatedTasks';
+import { useAppRuntime } from '../../state/RuntimeProvider';
 import { ToolGroup } from '../ToolGroup';
 import type {
   ApprovalScope,
@@ -289,13 +292,7 @@ export function EntryView({
       if (isDelegateTaskName(entry.call.function.name)) {
         return (
           <div className="flex justify-start">
-            <DelegateCard
-              call={entry.call}
-              status={entry.status}
-              result={entry.result}
-              startedAt={entry.startedAt}
-              steps={entry.delegateSteps}
-            />
+            <LiveDelegateCard entry={entry} />
           </div>
         );
       }
@@ -544,9 +541,38 @@ export type MessageActions = {
   fork: ((entry: Entry) => void) | null;
   /** Show an image full-screen. */
   openImage: (src: string) => void;
+  /** Switch to another chat (a delegated task's helper chat). */
+  openChat?: (sessionId: string) => void;
+  /** Stop a task this chat delegated. */
+  stopDelegate?: (taskId: string) => void;
 };
 
 export const MessageActionsContext = createContext<MessageActions | null>(null);
+
+/** The delegation card, following the task its call started (a task runs on
+ *  after the call returns): live state, its helper chat, Stop, and whether
+ *  the helper is waiting on you. */
+function LiveDelegateCard({ entry }: { entry: Extract<Entry, { kind: 'tool' }> }) {
+  const actions = useContext(MessageActionsContext);
+  const { tasks } = useDelegatedTasks();
+  const task = taskForCall(entry.call, entry.result, tasks);
+  const runtime = useAppRuntime();
+  const waiting = useSelector(runtime.sessionActivity, (state) =>
+    task ? state.activity?.waiting.has(task.child_id) ?? false : false);
+  return (
+    <DelegateCard
+      call={entry.call}
+      status={entry.status}
+      result={entry.result}
+      startedAt={entry.startedAt}
+      steps={entry.delegateSteps}
+      task={task}
+      waiting={waiting}
+      onOpenChat={actions?.openChat}
+      onStop={actions?.stopDelegate}
+    />
+  );
+}
 
 /** Stats for the turn a final reply closes — shown in its hover row. */
 export type TurnStats = {

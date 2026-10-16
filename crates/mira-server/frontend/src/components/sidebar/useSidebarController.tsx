@@ -1,4 +1,5 @@
 import { hasHiddenTitleBar } from '@/lib/desktop';
+import { useSelector } from '@tanstack/react-store';
 import { useEffect,useMemo,useRef,useState } from 'react';
 import {
 deleteSession,
@@ -57,15 +58,17 @@ export function useSidebarController({
   const setSessions = (apply: (previous: SessionSummary[]) => SessionSummary[]) =>
     runtime.resources.accept('sessions', apply(runtime.queryClient.getQueryData<SessionSummary[]>(runtime.resources.key('sessions')) ?? []));
 
+  // Live "waiting on you" (an approval, question, plan or secret), which
+  // the listed `needs_attention` only catches up with on the next refresh.
+  const waitingSessions = useSelector(runtime.sessionActivity, (state) => state.activity?.waiting ?? null);
   const sessions = useMemo(
     () =>
-      runningSessions == null
-        ? storedSessions
-        : storedSessions.map((session) => ({
-            ...session,
-            running: runningSessions.has(session.id),
-          })),
-    [storedSessions, runningSessions],
+      storedSessions.map((session) => ({
+        ...session,
+        ...(runningSessions == null ? {} : { running: runningSessions.has(session.id) }),
+        ...(waitingSessions == null ? {} : { needs_attention: waitingSessions.has(session.id) }),
+      })),
+    [storedSessions, runningSessions, waitingSessions],
   );
 
 

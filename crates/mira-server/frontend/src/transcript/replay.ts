@@ -60,10 +60,50 @@ export function entriesForTranscriptPage(page: import('../types').TranscriptPage
     entries.push(...rebuilt.map(entry => ({ ...entry, transcriptTurnIndex: first.turn_index, providerTurnIndex: first.provider_turn_index })));
     offset = end;
   }
-  return entries;
+  return settleAbandonedPrompts(entries);
+}
+
+/** A replayed question or plan with no result is still waiting only if no
+ *  later turn started; one followed by a user message was abandoned (the
+ *  agent stopped), so it must not come back as an actionable card. */
+function settleAbandonedPrompts(entries: Entry[]): Entry[] {
+  let laterUser = false;
+  const out = entries.slice();
+  for (let i = out.length - 1; i >= 0; i--) {
+    const e = out[i];
+    if (e.kind === 'msg' && e.msg.role === 'user' && e.msg.input_intent !== 'steer') { laterUser = true; continue; }
+    if (!laterUser || e.kind !== 'tool') continue;
+    if (e.askUser?.decision === null) out[i] = { ...e, askUser: { ...e.askUser, decision: { cancelled: true } } };
+    else if (e.plan?.decision === null) out[i] = { ...e, plan: { ...e.plan, decision: { approved: false } } };
+  }
+  return out;
+}
+
+/** A question or plan the transcript shows unanswered that the server
+ *  isn't waiting on (its turn ended, or Mira restarted) can't be answered
+ *  any more: close it rather than offer a card that goes nowhere. Older
+ *  servers send no list; leave those alone. Runtime questions (answered
+ *  later through the request store) are kept. */
+export function settleDeadPrompts(entries: Entry[], live: string[] | undefined): Entry[] {
+  if (!live) return entries;
+  const waiting = new Set(live);
+  return entries.map((e) => {
+    if (e.kind !== 'tool' || e.result || e.runtimeDelivery || waiting.has(e.call.id)) return e;
+    if (e.askUser?.decision === null) return { ...e, askUser: { ...e.askUser, decision: { cancelled: true } } };
+    if (e.plan?.decision === null) return { ...e, plan: { ...e.plan, decision: { approved: false } } };
+    return e;
+  });
 }
 
 export function interleaveReplay(
+  history: Message[],
+  previews: Record<string, DiffPreview> | undefined,
+  lines: AgentTranscriptLine[],
+): Entry[] {
+  return settleAbandonedPrompts(interleaveReplayRaw(history, previews, lines));
+}
+
+function interleaveReplayRaw(
   history: Message[],
   previews: Record<string, DiffPreview> | undefined,
   lines: AgentTranscriptLine[],
@@ -121,7 +161,15 @@ export function replayAgentTranscript(lines: AgentTranscriptLine[]): Entry[] {
       case 'tool_start': {
         const msg = f as Extract<ServerMsg, { type: 'tool_start' }>;
         out = upsertToolStart(out, msg.call);
-        out = updateTool(out, msg.call.id, entry => ({ ...entry, startedAt: line.t }));
+        out = updateTool(out, msg.call.id, entry => {
+          // A question or plan still waiting for its answer: its live
+          // `ask_user_request` / `plan_request` frame went out while this
+          // chat wasn't open, so the card is rebuilt from the call itself
+          // (its id is the prompt id the answer goes back to).
+          const askUser = entry.call.function.name === 'ask_user' && !entry.askUser ? restoreAskUserFromCall(entry.call, null, true) : undefined;
+          const plan = entry.call.function.name === 'plan' && !entry.plan ? restorePlanFromCall(entry.call, null) : undefined;
+          return { ...entry, startedAt: line.t, ...(askUser ? { askUser } : {}), ...(plan ? { plan } : {}) };
+        });
         break;
       }
       case 'tool_end': {
@@ -349,16 +397,30 @@ export function historyToEntries(
 export function restoreAskUserFromCall(
   call: ToolCall,
   result: ToolResult | null,
-): { proposal: AskUserProposal; decision: AskUserDecision } | undefined {
+  pendingWithoutResult = false,
+): { proposal: AskUserProposal; decision: AskUserDecision | null } | undefined {
   let proposal: AskUserProposal;
   try {
     const args = JSON.parse(call.function.arguments) as { questions?: unknown };
     if (!Array.isArray(args.questions)) return undefined;
-    proposal = { questions: args.questions as AskUserProposal['questions'] };
+    // An external agent's call carries its own shape (Claude Code's
+    // `multiSelect`, options without `recommended`); normalize to the card's.
+    proposal = {
+      questions: (args.questions as Record<string, unknown>[]).map((q) => ({
+        ...q,
+        question: String(q.question ?? ''),
+        multi_select: Boolean(q.multi_select ?? q.multiSelect),
+        options: Array.isArray(q.options)
+          ? (q.options as Record<string, unknown>[]).map((o) => ({ ...o, label: String(o.label ?? ''), recommended: Boolean(o.recommended) }))
+          : [],
+      })) as AskUserProposal['questions'],
+    };
   } catch {
     return undefined;
   }
-  const decision = parseAskUserResultText(result?.content ?? '', proposal.questions.length);
+  // No result on a live call: still waiting for the user, so the card stays
+  // actionable. Persisted history without one is an abandoned question.
+  const decision = !result && pendingWithoutResult ? null : parseAskUserResultText(result?.content ?? '', proposal.questions.length);
   return { proposal, decision };
 }
 
