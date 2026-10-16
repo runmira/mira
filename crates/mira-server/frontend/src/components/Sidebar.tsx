@@ -19,7 +19,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { PluginsPanel, PullRequestPanel, SessionPeek } from '../lazyViews';
+import { PluginsPanel, PullRequestPanel, SessionPeek, WorkSidebarView } from '../lazyViews';
 import { isSettled } from '../lib/settled';
 import { settledPeriod, type SidebarFilter } from '../lib/sidebar';
 import { BranchElbow } from './BranchElbow';
@@ -57,6 +57,7 @@ export function Sidebar(props: Props) {
     settingsSection = 'provider',
     onSettingsSectionChange,
     onExitSettings,
+    onAttachSession,
   } = props;
   const {
     hiddenTitleBar,
@@ -170,15 +171,24 @@ export function Sidebar(props: Props) {
               The selected half is near-opaque so the active tab is
               unambiguous without relying on colour alone. */}
             <div className="grid grid-cols-2 gap-0.5 rounded-full border border-border/80 bg-shade/25 p-0.5 backdrop-blur-md">
-              <span className="rounded-full bg-foreground/90 px-3.5 py-1 text-center text-[12.5px] font-medium text-background">
-                Chat
-              </span>
-              <span
-                title="Not implemented yet"
-                className="cursor-not-allowed rounded-full px-3.5 py-1 text-center text-[12.5px] text-foreground/45"
-              >
-                Work
-              </span>
+              {(['chat', 'work'] as const).map((tab) => {
+                const selected = (tab === 'work') === (activeView === 'work');
+                return (
+                  <button
+                    key={tab}
+                    type="button"
+                    aria-pressed={selected}
+                    onClick={() => !selected && onNavigate(tab)}
+                    onPointerEnter={tab === 'work' ? WorkSidebarView.preload : undefined}
+                    className={cn(
+                      'rounded-full px-3.5 py-1 text-center text-[12.5px] transition-colors',
+                      selected ? 'bg-foreground/90 font-medium text-background' : 'text-foreground/70 hover:text-foreground',
+                    )}
+                  >
+                    {tab === 'chat' ? 'Chat' : 'Work'}
+                  </button>
+                );
+              })}
             </div>
           </div>
         )}
@@ -230,6 +240,15 @@ export function Sidebar(props: Props) {
                 })}
               </nav>
             </div>
+          </div>
+        ) : activeView === 'work' ? (
+          <div className="flex min-h-0 flex-1 flex-col">
+            <LazyBoundary>
+              <WorkSidebarView sessionId={activeSessionId} onOpenChat={(id) => {
+                onAttachSession?.(id);
+                onNavigate('chat');
+              }} />
+            </LazyBoundary>
           </div>
         ) : (
           <div className="flex min-h-0 flex-1 flex-col">

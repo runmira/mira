@@ -384,6 +384,8 @@ pub struct Session {
     /// Where this chat was forked from ("Fork from here"), kept on every
     /// checkpoint so the sidebar can nest it under the original.
     forked_from: Option<crate::persist::ForkPoint>,
+    /// The branch this chat last saved on (see `SessionRecord::branch`).
+    branch: Arc<std::sync::Mutex<Option<String>>>,
     /// Which external agent drives turns here, if any. Mirrored in-memory
     /// so checkpoints stamp it without the server re-setting it every
     /// round — same story as `pinned`. The transcript itself lives in the
@@ -551,6 +553,7 @@ impl Session {
             steer_inbox: Arc::new(StdMutex::new(None)),
             parent_id: None,
             forked_from: None,
+            branch: Arc::new(std::sync::Mutex::new(None)),
             agent: Arc::new(Mutex::new(None)),
             children,
             next_child_id,
@@ -652,6 +655,7 @@ impl Session {
             steer_inbox: Arc::new(StdMutex::new(None)),
             parent_id: record.parent_id,
             forked_from: record.forked_from,
+            branch: Arc::new(std::sync::Mutex::new(record.branch)),
             agent: Arc::new(Mutex::new(record.agent)),
             children,
             next_child_id,
@@ -3040,8 +3044,19 @@ async fn checkpoint_unlocked(sess: &Session) -> Result<(), crate::persist::Store
         archived_at: *sess.archived_at.lock().await,
         settle: *sess.settle.lock().await,
         previews: sess.previews.lock().await.clone(),
+        branch: current_branch(sess),
     };
     store.save(&record).await
+}
+
+/// The branch the chat's folder has checked out now, or the last one it
+/// saved on when there is none (a detached HEAD mid-rebase, say).
+fn current_branch(sess: &Session) -> Option<String> {
+    let mut last = sess.branch.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(now) = crate::persist::branch::checked_out_branch(&sess.tool_ctx.cwd) {
+        *last = Some(now);
+    }
+    last.clone()
 }
 
 /// Truncate a tool result to a size the model can safely re-ingest.

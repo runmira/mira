@@ -8,6 +8,7 @@
 //! The trait exists so tests and future backends (Postgres, S3, etc.) can
 //! slot in without touching the harness.
 
+pub mod branch;
 pub mod file_store;
 
 use std::collections::HashMap;
@@ -152,6 +153,11 @@ pub struct SessionRecord {
     /// it's a full, user-facing chat, and deleting the original leaves it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from: Option<ForkPoint>,
+    /// The branch the chat's folder had checked out when it last saved: the
+    /// branch it was working on. Kept through a detached HEAD. Absent outside
+    /// git and for records written before this existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
 }
 
 /// Where a forked chat branched off its original.
@@ -283,6 +289,7 @@ impl SessionRecord {
             tasks: self.tasks.clone(),
             goal: None,
             previews,
+            branch: self.branch.clone(),
             pinned: false,
             archived_at: None,
             settle: SettleMarks::default(),
@@ -349,6 +356,7 @@ impl SessionRecord {
             tasks: self.tasks.clone(),
             goal: None,
             previews,
+            branch: self.branch.clone(),
             pinned: false,
             archived_at: None,
             settle: SettleMarks::default(),
@@ -401,6 +409,8 @@ pub struct SessionListRecord {
     pub settle: SettleMarks,
     pub agent_driver: Option<String>,
     pub forked_from: Option<ForkPoint>,
+    #[serde(default)]
+    pub branch: Option<String>,
 }
 impl From<&SessionRecord> for SessionListRecord {
     fn from(record: &SessionRecord) -> Self {
@@ -426,6 +436,7 @@ impl From<&SessionRecord> for SessionListRecord {
                 .filter(|agent| agent.active)
                 .map(|agent| agent.driver_kind.clone()),
             forked_from: record.forked_from.clone(),
+            branch: record.branch.clone(),
         }
     }
 }
@@ -647,6 +658,7 @@ mod fork_tests {
             tasks: Vec::new(),
             goal: None,
             previews: HashMap::new(),
+            branch: None,
             pinned: true,
             archived_at: None,
             settle: SettleMarks::default(),

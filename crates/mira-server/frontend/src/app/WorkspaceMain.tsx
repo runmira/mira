@@ -23,6 +23,7 @@ GetStarted,
 GoalPanel,
 PluginsPanel,
 PullRequestPanel,
+WorkView,
 ReviewChanges,
 SubagentPanel,
 TerminalPanel,
@@ -622,8 +623,20 @@ export function WorkspaceMain(
 
           {/* Every page gets the same toolbar as the chat (Settings draws
               its own, with its section's name). */}
-          {!phone && mainView !== 'chat' && mainView !== 'settings' && (
+          {!phone && mainView !== 'chat' && mainView !== 'settings' && mainView !== 'work' && (
             <PageToolbar title={PAGE_TITLES[mainView]} />
+          )}
+
+          {mainView === 'work' && (
+            <LazyBoundary>
+              <WorkView
+                activeSessionId={sessionId}
+                onOpenChat={(id) => {
+                  attachSession(id);
+                  setMainView('chat');
+                }}
+              />
+            </LazyBoundary>
           )}
 
           {mainView === 'plugins' && (

@@ -22,4 +22,6 @@ export const PREF_KEYS = {
   diffMarkers: 'mira.diff.markers',
   diffLineNumbers: 'mira.diff.lineNumbers',
   diffTint: 'mira.diff.tint',
+  /** Work tab shelves the user folded, comma-separated (Done by default). */
+  workShelvesClosed: 'mira.work.shelvesClosed',
 } as const;
