@@ -6,6 +6,67 @@ pub(crate) async fn cli_token() -> Option<String> {
     cli_token_from(&program).await
 }
 
+/// The `gh` login, asked for at most every few minutes: spawning `gh` costs
+/// more than many GitHub requests do.
+pub(crate) async fn cached_cli_token() -> Option<String> {
+    const FRESH: std::time::Duration = std::time::Duration::from_secs(300);
+    if let Some((at, token)) = cli_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+    {
+        if at.elapsed() < FRESH {
+            return token;
+        }
+    }
+    let token = cli_token().await;
+    *cli_cache().lock().unwrap_or_else(|e| e.into_inner()) =
+        Some((std::time::Instant::now(), token.clone()));
+    token
+}
+
+/// GitHub rejected the cached login too: ask `gh` again next time.
+pub(crate) fn forget_cli_token() {
+    *cli_cache().lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+type CliCache = std::sync::Mutex<Option<(std::time::Instant, Option<String>)>>;
+
+fn cli_cache() -> &'static CliCache {
+    static CACHE: std::sync::OnceLock<CliCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Keys GitHub answered 401 to during this run, by hash. A key saved in
+/// Settings then stops costing a failed request before every fallback;
+/// saving a new key changes the hash, so it's tried again.
+pub(crate) fn mark_rejected(token: &str) {
+    rejected()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(token_hash(token));
+}
+
+pub(crate) fn is_rejected(token: &str) -> bool {
+    rejected()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(&token_hash(token))
+}
+
+fn rejected() -> &'static std::sync::Mutex<std::collections::HashSet<u64>> {
+    static REJECTED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<u64>>> =
+        std::sync::OnceLock::new();
+    REJECTED.get_or_init(Default::default)
+}
+
+fn token_hash(token: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    token.hash(&mut hasher);
+    hasher.finish()
+}
+
 async fn cli_token_from(program: &Path) -> Option<String> {
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(3),
@@ -34,6 +95,17 @@ async fn cli_token_from(program: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rejected_key_is_remembered_by_value_not_kept() {
+        assert!(!is_rejected("key-a"));
+        mark_rejected("key-a");
+        assert!(is_rejected("key-a"));
+        assert!(
+            !is_rejected("key-b"),
+            "a newly saved key gets its own chance"
+        );
+    }
     #[tokio::test]
     async fn cli_login_is_private_noninteractive_and_host_bound() {
         let dir = tempfile::tempdir().unwrap();

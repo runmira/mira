@@ -1,12 +1,13 @@
 import { queryOptions, useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useSelector } from '@tanstack/react-store';
 import { createWorktree, getSessionDiff, putCwd, renameSession, type SessionDiffView } from '../../api';
-import { getPullRequest, getPullRequestFiles, mergePullRequest, type PullRequestDetailView } from '../../api/pullRequests';
+import { mergePullRequest, type PullRequestDetailView } from '../../api/pullRequests';
 import { sessionFetch } from '../../api/sessionScope';
 import { issueToken, rememberIssue, searchIssues, type IssueOption } from '../../lib/issueMentions';
 import { branchFor, branchOf, ciState, groupWorkItems, linkedIssue, prOf, prRef, projectRoot, reviewState, type WorkItem, type WorkMeta } from '../../lib/workItems';
 import type { SessionSummary } from '../../types';
 import { useAppRuntime } from '../RuntimeProvider';
+import { invalidatePr, prQueries } from '../pullRequests/queries';
 
 /* Server state for the Work tab. Everything here is a query or a mutation:
  * work items are derived from the sessions resource plus each open PR's
@@ -19,22 +20,10 @@ type PrRef = NonNullable<ReturnType<typeof prRef>>;
 const EMPTY: SessionSummary[] = [];
 
 export const workQueries = {
-  pr: (runtime: Runtime, ref: PrRef) =>
-    queryOptions({
-      queryKey: runtime.resourceKey('work-pr', ref.owner, ref.repo, String(ref.number)),
-      queryFn: () => getPullRequest(ref.owner, ref.repo, ref.number),
-      staleTime: 60_000,
-      retry: false,
-      // Follow checks while they run; GitHub's rate limit rules out more.
-      refetchInterval: (query) => (query.state.data && ciState(query.state.data.checks) === 'pending' ? 30_000 : false),
-    }),
-  prFiles: (runtime: Runtime, ref: PrRef) =>
-    queryOptions({
-      queryKey: runtime.resourceKey('work-pr-files', ref.owner, ref.repo, String(ref.number)),
-      queryFn: () => getPullRequestFiles(ref.owner, ref.repo, ref.number),
-      staleTime: 60_000,
-      retry: false,
-    }),
+  /** PR detail and files are the shared PR queries: the panel and Work
+   *  read one cache. */
+  pr: (runtime: Runtime, ref: PrRef) => prQueries.detail(runtime, ref),
+  prFiles: (runtime: Runtime, ref: PrRef) => prQueries.files(runtime, ref),
   /** Uncommitted changes in the branch's checkout, asked through one of
    *  its chats (the server resolves the folder from the session). */
   uncommitted: (runtime: Runtime, sessionId: string) =>
@@ -152,7 +141,7 @@ export function useMergeWork(item: WorkItem | null) {
     },
     onSuccess: async () => {
       if (!ref) return;
-      await client.invalidateQueries({ queryKey: workQueries.pr(runtime, ref).queryKey });
+      await invalidatePr(client, runtime, ref);
       // The PR's state rides on the sessions list.
       await runtime.resources.refresh('sessions').catch(() => undefined);
     },

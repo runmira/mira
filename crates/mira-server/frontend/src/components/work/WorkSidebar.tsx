@@ -34,9 +34,12 @@ export function WorkSidebar({
   items,
   activeKey,
   onPick,
+  onIntent,
   onStartWork,
 }: {
   items: WorkItem[];
+  /** Hover or focus on a row: load what its page will need. */
+  onIntent?: (item: WorkItem) => void;
   activeKey: string | null;
   onPick: (key: string) => void;
   onStartWork: () => void;
@@ -75,6 +78,7 @@ export function WorkSidebar({
                     item={item}
                     active={item.key === activeKey}
                     onPick={() => onPick(item.key)}
+                    onIntent={onIntent ? () => onIntent(item) : undefined}
                   />
                 ))}
               </div>
@@ -92,10 +96,12 @@ export function WorkRow({
   item,
   active,
   onPick,
+  onIntent,
 }: {
   item: WorkItem;
   active: boolean;
   onPick: () => void;
+  onIntent?: () => void;
 }) {
   const running = item.sessions.some((s) => s.running);
   const diff = item.meta.diff;
@@ -105,6 +111,8 @@ export function WorkRow({
       role="button"
       tabIndex={0}
       onClick={onPick}
+      onPointerEnter={onIntent}
+      onFocus={onIntent}
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();

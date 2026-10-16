@@ -1,13 +1,14 @@
 import { useOptionalRuntime } from '../state/RuntimeProvider';
 import { cn } from '@/lib/utils';
 import { MessageCircle, Search } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMemo, useState } from 'react';
 import {
-  listPullRequests,
   type PullRequestListView,
   type PullRequestSummary,
   type RepoGroup,
 } from '../api';
+import { prQueries, usePrefetchPr } from '../state/pullRequests/queries';
 import { PullRequestDetail } from './pullRequests/PullRequestDetail';
 import { PrIcon, timeAgo } from './pullRequests/shared';
 import type { Selection } from './pullRequests/types';
@@ -29,45 +30,32 @@ export function PullRequestPanel({
   onReviewPr: (owner: string, repo: string, number: number) => void;
 }) {
 
-  const requestRuntime = useOptionalRuntime();  const [list, setList] = useState<PullRequestListView | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const requestRuntime = useOptionalRuntime();
+  const client = useQueryClient();
+  const prefetch = usePrefetchPr();
+  // The repos to list follow the chat the panel was opened from.
+  const [sessionId] = useState(
+    () => requestRuntime?.sessionState.get().active ?? requestRuntime?.sessionState.get().selected ?? undefined,
+  );
+  const listQuery = useQuery(prQueries.list(requestRuntime, sessionId));
+  const list: PullRequestListView | null = listQuery.data ?? null;
+  const loading = listQuery.isPending;
+  const error = listQuery.error?.message ?? null;
   const [filter, setFilter] = useState<Filter>('all');
   const [search, setSearch] = useState('');
-  const [selection, setSelection] = useState<Selection | null>(null);
-  const [refreshTick, setRefreshTick] = useState(0);
+  const [picked, setSelection] = useState<Selection | null>(null);
   const [detailPane, setDetailPane] = useState<'summary' | 'code'>('summary');
   const [expanded, setExpanded] = useState(false);
 
-  useEffect(() => {
-    setLoading(true);
-    listPullRequests(requestRuntime?.sessionState.get().active ?? requestRuntime?.sessionState.get().selected ?? undefined)
-      .then((v) => {
-        setList(v);
-        setError(null);
-      })
-      .catch((e) => setError(String((e as Error).message)))
-      .finally(() => setLoading(false));
-  }, [refreshTick]);
-
   const filtered = useMemo(() => filterAndSearch(list, filter, search), [list, filter, search]);
 
-  // Auto-select the first PR when the list loads.
-  useEffect(() => {
-    if (selection || !list) return;
-    for (const g of filtered) {
-      if (g.prs.length > 0) {
-        const p = g.prs[0];
-        setSelection({
-          owner: g.owner,
-          repo: g.repo,
-          number: p.number,
-          project_label: g.project_label,
-        });
-        break;
-      }
-    }
-  }, [list, filtered, selection]);
+  // Until one is picked, show the first PR in view.
+  const first = filtered.find((g) => g.prs.length > 0);
+  const selection: Selection | null =
+    picked ??
+    (first
+      ? { owner: first.owner, repo: first.repo, number: first.prs[0].number, project_label: first.project_label }
+      : null);
 
   const needsToken = !loading && !error && list && list.authenticated_user === null;
 
@@ -109,6 +97,7 @@ export function PullRequestPanel({
                     ? selection.number
                     : null
                 }
+                onIntent={(pr) => prefetch({ owner: g.owner, repo: g.repo, number: pr.number })}
                 onSelect={(pr) =>
                   setSelection({
                     owner: g.owner,
@@ -149,7 +138,8 @@ export function PullRequestPanel({
             onPane={setDetailPane}
             expanded={expanded}
             onToggleExpand={() => setExpanded((v) => !v)}
-            onMutation={() => setRefreshTick((n) => n + 1)}
+            summary={selectedSummary(list, selection)}
+            onMutation={() => void client.invalidateQueries({ queryKey: prQueries.list(requestRuntime, sessionId).queryKey })}
             onReviewPr={onReviewPr}
           />
         ) : (
@@ -160,6 +150,13 @@ export function PullRequestPanel({
       </div>
     </div>
   );
+}
+
+/** The list's row for the selected PR, for the detail to paint from. */
+function selectedSummary(list: PullRequestListView | null, selection: Selection): PullRequestSummary | undefined {
+  return list?.repos
+    .find((g) => g.owner === selection.owner && g.repo === selection.repo)
+    ?.prs.find((pr) => pr.number === selection.number);
 }
 
 /* ---------- left column ---------- */
@@ -226,11 +223,14 @@ function RepoSection({
   group,
   activeNumber,
   onSelect,
+  onIntent,
   authUser,
 }: {
   group: RepoGroup;
   activeNumber: number | null;
   onSelect: (pr: PullRequestSummary) => void;
+  /** Hover or focus: load the PR before the click. */
+  onIntent: (pr: PullRequestSummary) => void;
   authUser: string | null;
 }) {
   if (group.prs.length === 0) return null;
@@ -249,6 +249,7 @@ function RepoSection({
             pr={pr}
             active={pr.number === activeNumber}
             onClick={() => onSelect(pr)}
+            onIntent={() => onIntent(pr)}
             authUser={authUser}
           />
         ))}
@@ -261,16 +262,20 @@ function PullRequestRow({
   pr,
   active,
   onClick,
+  onIntent,
   authUser,
 }: {
   pr: PullRequestSummary;
   active: boolean;
   onClick: () => void;
+  onIntent: () => void;
   authUser: string | null;
 }) {
   return (
     <button
       onClick={onClick}
+      onPointerEnter={onIntent}
+      onFocus={onIntent}
       className={cn(
         'grid w-full grid-cols-[auto_1fr_auto] items-start gap-2 border-l-2 px-3 py-2 text-left transition-colors',
         active ? 'border-mira-blue bg-accent/70' : 'border-transparent hover:bg-accent/30',

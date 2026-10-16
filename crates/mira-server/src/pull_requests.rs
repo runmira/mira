@@ -199,39 +199,43 @@ pub async fn list_pull_requests(State(state): State<AppState>) -> Response {
     };
 
     let client = build_client();
-    let authenticated_user = if let Some(t) = token.as_deref() {
-        fetch_user(&client, t).await.ok()
-    } else {
-        None
+    // Every repo, and who's signed in, at once.
+    let user = async {
+        match token.as_deref() {
+            Some(t) => fetch_user(&client, t).await.ok(),
+            None => None,
+        }
     };
+    let lists = futures::future::join_all(repos.into_iter().map(|src| {
+        let client = &client;
+        let token = token.as_deref();
+        async move {
+            let result = match token {
+                Some(token) => fetch_prs(client, token, &src.owner, &src.repo).await,
+                None => Ok(Vec::new()),
+            };
+            (src, result)
+        }
+    }));
+    let (authenticated_user, lists) = tokio::join!(user, lists);
 
     let mut groups: Vec<RepoGroup> = Vec::new();
     let mut errors: Vec<RepoError> = Vec::new();
-    for src in repos {
-        if let Some(token) = token.as_deref() {
-            match fetch_prs(&client, token, &src.owner, &src.repo).await {
-                Ok(prs) => groups.push(RepoGroup {
-                    owner: src.owner,
-                    repo: src.repo,
-                    project_label: src.label,
-                    cwd: src.cwd,
-                    prs,
-                }),
-                Err(e) => errors.push(RepoError {
-                    owner: src.owner,
-                    repo: src.repo,
-                    cwd: src.cwd,
-                    message: e,
-                }),
-            }
-        } else {
-            groups.push(RepoGroup {
+    for (src, result) in lists {
+        match result {
+            Ok(prs) => groups.push(RepoGroup {
                 owner: src.owner,
                 repo: src.repo,
                 project_label: src.label,
                 cwd: src.cwd,
-                prs: Vec::new(),
-            });
+                prs,
+            }),
+            Err(e) => errors.push(RepoError {
+                owner: src.owner,
+                repo: src.repo,
+                cwd: src.cwd,
+                message: e,
+            }),
         }
     }
 
@@ -260,10 +264,36 @@ pub async fn get_pull_request(
     let client = build_client();
     let base = format!("{GITHUB_API}/repos/{owner}/{repo}/pulls/{number}");
 
-    let pr_val: Value = match gh_get(&client, &token, &base).await {
+    // The PR and its lists don't depend on each other: ask for them all at
+    // once. Each list degrades to empty rather than sinking the whole page —
+    // a missing check-runs scope shouldn't make the PR un-viewable.
+    let issue_comments_url = format!("{GITHUB_API}/repos/{owner}/{repo}/issues/{number}/comments");
+    let reviews_url = format!("{base}/reviews");
+    let commits_url = format!("{base}/commits");
+    let timeline_url = format!("{GITHUB_API}/repos/{owner}/{repo}/issues/{number}/timeline");
+    let (pr_val, comments, reviews, commits, timeline) = tokio::join!(
+        gh_get::<Value>(&client, &token, &base),
+        gh_get::<Vec<Value>>(&client, &token, &issue_comments_url),
+        gh_get::<Vec<Value>>(&client, &token, &reviews_url),
+        gh_get::<Vec<Value>>(&client, &token, &commits_url),
+        gh_get::<Vec<Value>>(&client, &token, &timeline_url),
+    );
+    let pr_val = match pr_val {
         Ok(v) => v,
         Err(e) => return proxied_error(&e),
     };
+    let comments: Vec<CommentView> = comments
+        .map(|arr| arr.iter().map(comment_from).collect())
+        .unwrap_or_default();
+    let reviews: Vec<ReviewView> = reviews
+        .map(|arr| arr.iter().map(review_from).collect())
+        .unwrap_or_default();
+    let commits: Vec<CommitView> = commits
+        .map(|arr| arr.iter().map(commit_from).collect())
+        .unwrap_or_default();
+    let timeline: Vec<TimelineEventView> = timeline
+        .map(|arr| arr.iter().filter_map(timeline_from).collect())
+        .unwrap_or_default();
     let summary = summary_from(&pr_val);
     let body = pr_val
         .get("body")
@@ -285,31 +315,6 @@ pub async fn get_pull_request(
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-
-    // Fan out the auxiliary lists. Each failure degrades to an empty list
-    // rather than sinking the whole detail load — a missing check-runs
-    // scope shouldn't make the PR itself un-viewable.
-    let issue_comments_url = format!("{GITHUB_API}/repos/{owner}/{repo}/issues/{number}/comments");
-    let reviews_url = format!("{base}/reviews");
-    let commits_url = format!("{base}/commits");
-    let timeline_url = format!("{GITHUB_API}/repos/{owner}/{repo}/issues/{number}/timeline");
-
-    let comments: Vec<CommentView> = gh_get::<Vec<Value>>(&client, &token, &issue_comments_url)
-        .await
-        .map(|arr| arr.iter().map(comment_from).collect())
-        .unwrap_or_default();
-    let reviews: Vec<ReviewView> = gh_get::<Vec<Value>>(&client, &token, &reviews_url)
-        .await
-        .map(|arr| arr.iter().map(review_from).collect())
-        .unwrap_or_default();
-    let commits: Vec<CommitView> = gh_get::<Vec<Value>>(&client, &token, &commits_url)
-        .await
-        .map(|arr| arr.iter().map(commit_from).collect())
-        .unwrap_or_default();
-    let timeline: Vec<TimelineEventView> = gh_get::<Vec<Value>>(&client, &token, &timeline_url)
-        .await
-        .map(|arr| arr.iter().filter_map(timeline_from).collect())
-        .unwrap_or_default();
 
     let (check_status, checks) = if head_sha.is_empty() {
         (None, Vec::new())
@@ -633,37 +638,249 @@ async fn gh_request<T: serde::de::DeserializeOwned>(
     url: &str,
     body: Option<&Value>,
 ) -> Result<T, GhError> {
+    let key = (method == reqwest::Method::GET).then(|| response_cache::key(url, token));
+    if let Some(body) = key.as_ref().and_then(response_cache::fresh) {
+        return parse(&body);
+    }
+    // Stale but not invalidated by a write: answer now, refresh behind.
+    if let Some(body) = key.as_ref().and_then(response_cache::stale) {
+        if let Ok(value) = parse(&body) {
+            refresh_in_background(client.clone(), url.to_string(), token.to_string());
+            return Ok(value);
+        }
+    }
+    let body = fetch(client, method, token, url, body, key).await?;
+    parse(&body)
+}
+
+/// The network half of `gh_request`: a conditional request when there's an
+/// ETag, filed in the cache. GETs pass their cache `key`.
+async fn fetch(
+    client: &reqwest::Client,
+    method: reqwest::Method,
+    token: &str,
+    url: &str,
+    body: Option<&Value>,
+    key: Option<response_cache::Key>,
+) -> Result<std::sync::Arc<[u8]>, GhError> {
+    let etag = key.as_ref().and_then(response_cache::etag);
     let request = |token: &str| {
-        let request = client
+        let mut request = client
             .request(method.clone(), url)
             .bearer_auth(token)
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28");
+        if let Some(etag) = &etag {
+            // A 304 costs no rate limit and carries no body.
+            request = request.header("If-None-Match", etag);
+        }
         if let Some(body) = body {
             request.json(body)
         } else {
             request
         }
     };
-    send_with_auth_retry(
+    let raw = send_with_auth_retry(
         || request(token),
         |replacement| request(replacement),
-        crate::github_auth::cli_token,
+        crate::github_auth::cached_cli_token,
         token,
     )
-    .await
+    .await?;
+    let Some(key) = key else {
+        // A write can change anything we've read: revalidate from here on.
+        response_cache::expire_all();
+        return Ok(raw.body);
+    };
+    if raw.not_modified {
+        return response_cache::revalidated(&key).ok_or_else(|| {
+            GhError::network("GitHub said unchanged, but nothing is cached".into())
+        });
+    }
+    // File it under the credential that got it, which is the one the next
+    // request will use when the first was just rejected.
+    let key = match &raw.fallback_token {
+        Some(token) => response_cache::key(url, token),
+        None => key,
+    };
+    response_cache::store(key, raw.etag, raw.body.clone());
+    Ok(raw.body)
+}
+
+/// One conditional GET to bring a stale cache entry up to date. At most one
+/// per URL at a time; failures leave the entry as it was.
+fn refresh_in_background(client: reqwest::Client, url: String, token: String) {
+    if !response_cache::start_refresh(&response_cache::key(&url, &token)) {
+        return;
+    }
+    tokio::spawn(async move {
+        let key = response_cache::key(&url, &token);
+        let _ = fetch(
+            &client,
+            reqwest::Method::GET,
+            &token,
+            &url,
+            None,
+            Some(key.clone()),
+        )
+        .await;
+        response_cache::end_refresh(&key);
+    });
+}
+
+fn parse<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, GhError> {
+    serde_json::from_slice(body).map_err(|e| GhError::network(format!("parse: {e}")))
+}
+
+/// A successful (or 304) GitHub response, before parsing.
+struct RawResponse {
+    etag: Option<String>,
+    body: std::sync::Arc<[u8]>,
+    not_modified: bool,
+    /// Set when the first credential was rejected and this one answered.
+    fallback_token: Option<String>,
+}
+
+/// GitHub GETs, kept briefly and revalidated with ETags. The Work tab, the
+/// PR panel and the sidebar ask for the same PR within seconds of each
+/// other; within `FRESH` they share one answer, and after it a conditional
+/// request costs a round trip but no body and no rate limit.
+mod response_cache {
+    use std::collections::HashMap;
+    use std::hash::{Hash, Hasher};
+    use std::sync::{Arc, Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+
+    const FRESH: Duration = if cfg!(test) {
+        Duration::from_millis(150)
+    } else {
+        Duration::from_secs(10)
+    };
+    /// How old an answer may be and still be shown while it refreshes.
+    const STALE: Duration = Duration::from_secs(300);
+    const MAX_ENTRIES: usize = 512;
+
+    #[derive(Clone, PartialEq, Eq, Hash, Debug)]
+    pub(super) struct Key {
+        url: String,
+        /// Answers can differ per credential; the token itself isn't kept.
+        token: u64,
+    }
+
+    struct Entry {
+        /// `None` once a write may have changed it: then it's only good for
+        /// its ETag.
+        at: Option<Instant>,
+        refreshing: bool,
+        etag: Option<String>,
+        body: Arc<[u8]>,
+    }
+
+    fn entries() -> &'static Mutex<HashMap<Key, Entry>> {
+        static CACHE: OnceLock<Mutex<HashMap<Key, Entry>>> = OnceLock::new();
+        CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn lock() -> std::sync::MutexGuard<'static, HashMap<Key, Entry>> {
+        entries().lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub(super) fn key(url: &str, token: &str) -> Key {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        token.hash(&mut hasher);
+        Key {
+            url: url.to_string(),
+            token: hasher.finish(),
+        }
+    }
+
+    pub(super) fn fresh(key: &Key) -> Option<Arc<[u8]>> {
+        lock()
+            .get(key)
+            .filter(|e| e.at.is_some_and(|at| at.elapsed() < FRESH))
+            .map(|e| e.body.clone())
+    }
+
+    pub(super) fn stale(key: &Key) -> Option<Arc<[u8]>> {
+        lock()
+            .get(key)
+            .filter(|e| e.at.is_some_and(|at| at.elapsed() < STALE))
+            .map(|e| e.body.clone())
+    }
+
+    /// Claims the entry's background refresh; false if one is running.
+    pub(super) fn start_refresh(key: &Key) -> bool {
+        match lock().get_mut(key) {
+            Some(entry) if !entry.refreshing => {
+                entry.refreshing = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub(super) fn end_refresh(key: &Key) {
+        if let Some(entry) = lock().get_mut(key) {
+            entry.refreshing = false;
+        }
+    }
+
+    pub(super) fn etag(key: &Key) -> Option<String> {
+        lock().get(key).and_then(|e| e.etag.clone())
+    }
+
+    /// GitHub confirmed the cached body: fresh again.
+    pub(super) fn revalidated(key: &Key) -> Option<Arc<[u8]>> {
+        let mut cache = lock();
+        let entry = cache.get_mut(key)?;
+        entry.at = Some(Instant::now());
+        Some(entry.body.clone())
+    }
+
+    pub(super) fn store(key: Key, etag: Option<String>, body: Arc<[u8]>) {
+        let mut cache = lock();
+        if cache.len() >= MAX_ENTRIES && !cache.contains_key(&key) {
+            let oldest = cache
+                .iter()
+                .min_by_key(|(_, e)| e.at)
+                .map(|(k, _)| k.clone());
+            if let Some(oldest) = oldest {
+                cache.remove(&oldest);
+            }
+        }
+        cache.insert(
+            key,
+            Entry {
+                at: Some(Instant::now()),
+                refreshing: false,
+                etag,
+                body,
+            },
+        );
+    }
+
+    /// Keep bodies and ETags but trust none of them without asking.
+    pub(super) fn expire_all() {
+        for entry in lock().values_mut() {
+            entry.at = None;
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn clear() {
+        lock().clear();
+    }
 }
 
 /// Only 401 is safe to recover with another credential. A denied scope (403),
 /// missing resource (404), network failure or rejected mutation is never replayed.
-async fn send_with_auth_retry<T, F, G, H, Fut>(
+async fn send_with_auth_retry<F, G, H, Fut>(
     initial: F,
     replacement: G,
     fallback: H,
     original: &str,
-) -> Result<T, GhError>
+) -> Result<RawResponse, GhError>
 where
-    T: serde::de::DeserializeOwned,
     F: FnOnce() -> reqwest::RequestBuilder,
     G: FnOnce(&str) -> reqwest::RequestBuilder,
     H: FnOnce() -> Fut,
@@ -676,25 +893,43 @@ where
     if response.status() != StatusCode::UNAUTHORIZED {
         return handle(response).await;
     }
+    // Don't send this credential first again: every request would pay for
+    // the rejection before the fallback.
+    crate::github_auth::mark_rejected(original);
     if let Some(token) = fallback().await.filter(|token| token != original) {
         let response = replacement(&token)
             .send()
             .await
             .map_err(|e| GhError::network(e.to_string()))?;
         if response.status() != StatusCode::UNAUTHORIZED {
-            return handle(response).await;
+            return handle(response).await.map(|raw| RawResponse {
+                fallback_token: Some(token),
+                ..raw
+            });
         }
+        crate::github_auth::forget_cli_token();
     }
     Err(GhError {status:Some(401),message:"GitHub sign-in expired. Update the GitHub token in Settings → Search & keys, or run `gh auth login` on the machine running Mira.".into()})
 }
 
-async fn handle<T: serde::de::DeserializeOwned>(resp: reqwest::Response) -> Result<T, GhError> {
+async fn handle(resp: reqwest::Response) -> Result<RawResponse, GhError> {
     let status = resp.status();
-    if status.is_success() {
-        return resp
-            .json::<T>()
+    if status.is_success() || status == StatusCode::NOT_MODIFIED {
+        let etag = resp
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        let body = resp
+            .bytes()
             .await
-            .map_err(|e| GhError::network(format!("parse: {e}")));
+            .map_err(|e| GhError::network(e.to_string()))?;
+        return Ok(RawResponse {
+            etag,
+            body: body.to_vec().into(),
+            not_modified: status == StatusCode::NOT_MODIFIED,
+            fallback_token: None,
+        });
     }
     let text = resp.text().await.unwrap_or_default();
     // GitHub returns `{"message": "..."}` for most errors.
@@ -1296,10 +1531,12 @@ pub async fn mention_card(
     }
 }
 
+/// The configured key, unless GitHub already rejected it this run; then (or
+/// without one) the `gh` login, cached so requests don't each spawn `gh`.
 async fn resolve_token() -> Option<String> {
     match resolve_github_token() {
-        Some(token) => Some(token),
-        None => crate::github_auth::cli_token().await,
+        Some(token) if !crate::github_auth::is_rejected(&token) => Some(token),
+        configured => crate::github_auth::cached_cli_token().await.or(configured),
     }
 }
 
@@ -1463,7 +1700,7 @@ mod auth_recovery_tests {
                         .bearer_auth(token)
                         .json(&serde_json::json!({"body":"same request"}))
                 };
-                let result: Result<Value, GhError> = send_with_auth_retry(
+                let result = send_with_auth_retry(
                     || build("expired"),
                     |token| build(token),
                     || {
@@ -1472,7 +1709,8 @@ mod auth_recovery_tests {
                     },
                     "expired",
                 )
-                .await;
+                .await
+                .and_then(|raw| parse::<Value>(&raw.body));
                 if status == 401 {
                     assert_eq!(result.unwrap()["ok"], true);
                     assert_eq!(calls.load(Ordering::SeqCst), 2);
@@ -1485,6 +1723,88 @@ mod auth_recovery_tests {
                 server.abort();
             }
         }
+    }
+
+    #[tokio::test]
+    async fn gets_are_reused_briefly_then_revalidated_with_their_etag() {
+        response_cache::clear();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let conditional = Arc::new(AtomicUsize::new(0));
+        let (seen, seen_conditional) = (calls.clone(), conditional.clone());
+        let router = axum::Router::new().route(
+            "/pr",
+            axum::routing::any(
+                move |method: axum::http::Method, headers: axum::http::HeaderMap| {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    let matched = headers.get("if-none-match").is_some_and(|v| v == "\"v1\"");
+                    if matched {
+                        seen_conditional.fetch_add(1, Ordering::SeqCst);
+                    }
+                    async move {
+                        if method == axum::http::Method::POST {
+                            return (StatusCode::OK, [("etag", "\"w\"")], "{}".to_string());
+                        }
+                        if matched {
+                            (
+                                StatusCode::NOT_MODIFIED,
+                                [("etag", "\"v1\"")],
+                                String::new(),
+                            )
+                        } else {
+                            (
+                                StatusCode::OK,
+                                [("etag", "\"v1\"")],
+                                r#"{"number":7}"#.to_string(),
+                            )
+                        }
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/pr", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = build_client();
+
+        let first: Value = gh_get(&client, "token", &url).await.unwrap();
+        let again: Value = gh_get(&client, "token", &url).await.unwrap();
+        assert_eq!(
+            (first["number"].as_u64(), again["number"].as_u64()),
+            (Some(7), Some(7))
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "a fresh answer is shared");
+
+        // A write makes every cached read ask again, conditionally.
+        let _: Value = gh_post(&client, "token", &url, &serde_json::json!({}))
+            .await
+            .unwrap();
+        let after: Value = gh_get(&client, "token", &url).await.unwrap();
+        assert_eq!(
+            after["number"].as_u64(),
+            Some(7),
+            "a 304 serves the cached body"
+        );
+        assert_eq!(conditional.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+        // Another credential doesn't see this one's answers.
+        let _: Value = gh_get(&client, "other", &url).await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+
+        // Past fresh: the stale answer comes back at once, and one
+        // conditional request refreshes it behind.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let stale: Value = gh_get(&client, "token", &url).await.unwrap();
+        assert_eq!(stale["number"].as_u64(), Some(7));
+        for _ in 0..50 {
+            if conditional.load(Ordering::SeqCst) == 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(conditional.load(Ordering::SeqCst), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 5);
+        server.abort();
     }
 
     #[tokio::test]
