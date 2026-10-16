@@ -159,13 +159,16 @@ pub async fn request_secret(
         .lock()
         .await
         .insert(prompt_id.clone(), tx);
-    let _ = slot.events_tx.send(ServerMsg::SecretRequest {
+    let request = ServerMsg::SecretRequest {
         prompt_id: prompt_id.clone(),
         name: name.to_string(),
         reason: reason.to_string(),
         dotenv: dotenv.map(str::to_string),
-    });
+    };
+    let live = slot.live_requests.hold(prompt_id.clone(), request.clone());
+    let _ = slot.events_tx.send(request);
     let answer = tokio::time::timeout(SECRET_WAIT, rx).await;
+    drop(live);
     slot.prompt_pending.lock().await.remove(&prompt_id);
     let value = match answer {
         Ok(Ok(PromptResponse::Secret(s))) if !s.cancelled => s.value.filter(|v| !v.is_empty()),

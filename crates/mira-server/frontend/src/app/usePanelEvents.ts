@@ -1,4 +1,5 @@
 import { applyReviewEvent,emptyReviewState } from '../components/ReviewPanel';
+import * as delegatedTasks from '../lib/delegatedTasks';
 import {
 appendDelegateStep,
 appendToken,
@@ -179,10 +180,15 @@ export function usePanelEvents(
         break;
 
       case 'delegate_progress':
-        // A step the delegated child just took. Routes to its card by call id
-        // (the parent's `delegate_task` id), with a fallback to the most
-        // recent running delegation for providers that don't echo the id.
+        // A step the delegated child just took: onto its task when named
+        // (the card follows the task), else onto the card by call id, with
+        // a fallback to the most recent running delegation.
+        if (msg.task_id && delegatedTasks.applyStep(msg.task_id, { kind: msg.kind, text: msg.text, at: receivedAt })) break;
         updateTranscript((prev) => appendDelegateStep(prev, msg.call_id, msg.kind, msg.text, receivedAt));
+        break;
+
+      case 'delegate_update':
+        delegatedTasks.applyUpdate(msg.task);
         break;
 
       case 'browser_active':

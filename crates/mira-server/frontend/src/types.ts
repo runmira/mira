@@ -473,7 +473,7 @@ export type TurnDiffSummary = { text: string; occurrence: number; files: { path:
 
 export interface QueuedInput {
   delivered?: boolean;
-  recovery?: { created_at: number; reset_at: number | null; scheduled_at: number | null; snoozed: boolean };
+  recovery?: { reason?: 'restart'; created_at: number; reset_at: number | null; scheduled_at: number | null; snoozed: boolean };
   id: string; text: string; images: ImageAttachment[]; engine: string | null;
   dispatching: boolean; error: string | null;
   fingerprint?: string;
@@ -483,6 +483,7 @@ export type ServerMsg =
   | { type: 'session_stream'; session_id: string; epoch: string; sequence: number; frame: ServerMsg }
   | { type: 'stream_resumed'; session_id: string; cursor: StreamCursor }
   | { type: 'session_activity'; epoch: string; revision: number; session_id: string; running: boolean }
+  | { type: 'session_waiting'; epoch: string; revision: number; session_id: string; waiting: boolean }
   | { type: 'session_activity_snapshot'; snapshot: import('./lib/sessionActivity').SessionActivitySnapshot }
   | { type: 'queue_updated'; session_id: string; items: QueuedInput[] }
   | { type: 'queue_delivery'; session_id: string; item: QueuedInput }
@@ -492,7 +493,7 @@ export type ServerMsg =
   | { type: 'acp_message_metadata'; message_id: string; phase: string }
   | { type: 'stream_activity'; kind: string; title: string; detail: string }
   | { type: 'history_page'; session_id: string; request_id: string; page: TranscriptPage | null; error: string | null }
-  | { type: 'ready'; stream_cursor?: StreamCursor; session_activity?: import('./lib/sessionActivity').SessionActivitySnapshot; queued_inputs?: QueuedInput[]; turn_diffs?: TurnDiffSummary[]; transcript_page?: TranscriptPage; session_id: string; model: string; mode: Mode; cwd: string; history: Message[]; turns?: TurnMeta[]; usage?: UsageTotals; tasks?: TaskItem[]; goal?: Goal | null; previews?: Record<string, DiffPreview>; agent_transcript?: AgentTranscriptLine[]; agent_driver?: string | null; agent_kind?: string | null; instance?: string | null; agent_configured?: string | null; engine?: SessionEngine | null; title?: string | null; running?: boolean; runtime_requests?: RuntimeRequestRecord[]; runtime_work?: RuntimeWork[] }
+  | { type: 'ready'; live_request_ids?: string[]; delegated_tasks?: import('./components/DelegateCard').DelegatedTask[]; parent_id?: string | null; stream_cursor?: StreamCursor; session_activity?: import('./lib/sessionActivity').SessionActivitySnapshot; queued_inputs?: QueuedInput[]; turn_diffs?: TurnDiffSummary[]; transcript_page?: TranscriptPage; session_id: string; model: string; mode: Mode; cwd: string; history: Message[]; turns?: TurnMeta[]; usage?: UsageTotals; tasks?: TaskItem[]; goal?: Goal | null; previews?: Record<string, DiffPreview>; agent_transcript?: AgentTranscriptLine[]; agent_driver?: string | null; agent_kind?: string | null; instance?: string | null; agent_configured?: string | null; engine?: SessionEngine | null; title?: string | null; running?: boolean; runtime_requests?: RuntimeRequestRecord[]; runtime_work?: RuntimeWork[] }
   /** The session's engine changed: picked, starting, ready, failed, exited. */
   | { type: 'session_engine'; engine: SessionEngine }
   | { type: 'runtime_request_updated'; request: RuntimeRequestRecord }
@@ -570,7 +571,8 @@ export type ServerMsg =
    *  card by `call_id` (or, failing an exact match, the most recent running
    *  delegation). `kind` is a coarse verb the UI maps to an icon; `text` is
    *  the human-readable step. */
-  | { type: 'delegate_progress'; call_id: string; kind: string; text: string }
+  | { type: 'delegate_progress'; call_id: string; task_id?: string; kind: string; text: string }
+  | { type: 'delegate_update'; task: import('./components/DelegateCard').DelegatedTask }
   // -------- ACP (external agent) frames --------
   // Distinct variants rather than a wrapped envelope, so this file
   // pattern-matches by `type` the same way it already does for subagents.
@@ -716,7 +718,8 @@ export type ClientMsg =
   | { type: 'detach' }
   /** Set the attached session's background mode — controls how the
    *  approver answers `Ask` decisions when no client is watching. */
-  | { type: 'set_background_mode'; mode: BackgroundMode };
+  | { type: 'set_background_mode'; mode: BackgroundMode }
+  | { type: 'delegate_cancel'; task_id: string };
 
 export type ProviderView = {
   name: string;
@@ -802,6 +805,7 @@ export type SettingsUpdate = {
 export type SessionsSettings = {
   auto_resume_after_limit: boolean;
   keep_awake_while_running: boolean;
+  resume_after_restart?: boolean;
 };
 
 export type WorktreeMergeStatus = 'merged' | 'unmerged';

@@ -104,6 +104,9 @@ mod unfurl;
 mod usage;
 mod walkthrough;
 mod ws;
+mod live_requests;
+mod restart_recovery;
+mod turn_touch;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -338,6 +341,11 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
     // Build the initial slot. Seeded from the ServerConfig's `resume` (if
     // present) so a `mira serve --resume <id>` picks up where it left off.
     let session_activity = Arc::new(crate::session_activity::ActivityHub::default());
+    // Chats the previous run left mid-turn, read before this run's set
+    // replaces them on disk.
+    let running_path = restart_recovery::path();
+    let interrupted = restart_recovery::previous(&running_path);
+    session_activity.persist_to(running_path);
     let deps = crate::slot::SlotDeps {
         session_activity: session_activity.clone(),
         policy: cfg.policy.clone(),
@@ -492,6 +500,8 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
     // without a re-signin.
     oauth::refresh::boot_rehydrate(&state).await;
     oauth::refresh::spawn(state.clone());
+
+    restart_recovery::spawn(state.clone(), interrupted);
 
     let devices = Arc::new(pairing::Devices::load(pairing::Devices::default_path()));
     // Restarts Cloudflare's connector if remote access was on.

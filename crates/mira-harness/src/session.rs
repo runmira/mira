@@ -783,6 +783,11 @@ impl Session {
         }
     }
 
+    /// The chat this one was spawned from, for a subagent.
+    pub fn parent_id(&self) -> Option<&SessionId> {
+        self.parent_id.as_ref()
+    }
+
     pub fn with_parent_id(mut self, parent: SessionId) -> Self {
         if let Some(account) = &self.spend {
             if let Err(e) = account.register_parent(&parent.to_string()) {

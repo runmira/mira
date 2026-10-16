@@ -83,18 +83,18 @@ impl ToolProgressSink for SessionProgress {
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
 pub enum BackgroundMode {
-    /// Auto-deny `Ask` when no client is attached. Safe default — the tool
-    /// call fails, the model sees the error, and the session doesn't burn
-    /// tokens on approvals no human will see.
-    #[default]
+    /// Auto-deny `Ask` when no client is attached: the tool call fails and
+    /// the model sees the error. For unattended children (delegated tasks).
     Deny,
     /// Auto-approve `Ask` when no client is attached. Use only when the
     /// session's policy is already narrow (read-only exploration, a
     /// subagent-heavy research task) so silent approval isn't dangerous.
     AutoApprove,
-    /// Park indefinitely — pre-multi-session behavior. The tool call
-    /// blocks until the user (re-)attaches and answers, or the
-    /// approver's 10-minute safety timeout trips.
+    /// The default: the request waits — with no time limit — until the
+    /// user opens the chat and answers (it's shown again then; see
+    /// [`crate::live_requests`]), or presses Stop. Switching to another
+    /// chat must not quietly refuse what this one asked.
+    #[default]
     Park,
 }
 
@@ -110,6 +110,9 @@ pub struct SessionSlot {
     pub events_tx: crate::session_stream::SessionEvents,
     pub pending: PendingMap,
     pub prompt_pending: PendingPromptMap,
+    /// Approvals and prompts waiting on the user, re-sent when a window
+    /// opens the chat.
+    pub live_requests: crate::live_requests::LiveRequests,
     pub runtime_requests: crate::runtime_requests::RequestStore,
     pub message_queue: crate::message_queue::MessageQueue,
     pub cwd: Arc<RwLock<PathBuf>>,
@@ -365,6 +368,7 @@ pub async fn build_slot(
     let cwd_lock = Arc::new(RwLock::new(cwd.clone()));
     let attached = Arc::new(AtomicUsize::new(0));
     let background_mode = Arc::new(RwLock::new(BackgroundMode::default()));
+    let live_requests = crate::live_requests::LiveRequests::default();
 
     let memory_store: Arc<dyn MemoryStore> = Arc::new(FileMemoryStore::new(
         mira_config::user_memory_path(),
@@ -384,10 +388,11 @@ pub async fn build_slot(
             attached.clone(),
             background_mode.clone(),
         )
-        .with_policy(deps.policy.clone()),
+        .with_policy(deps.policy.clone())
+        .with_live(live_requests.clone()),
     );
 
-    let prompt_channel = PromptChannel::new(events_tx.clone());
+    let prompt_channel = PromptChannel::new(events_tx.clone()).with_live(live_requests.clone());
     let prompt_pending = prompt_channel.pending();
     // Shared-trait view of the same channel for the moved tools.
     let prompt_shared: std::sync::Arc<dyn mira_tools::prompt::PromptChannel> =
@@ -502,6 +507,10 @@ pub async fn build_slot(
 
     session.set_engine_instance(instance).await;
     let id = session.id.clone();
+    {
+        let (hub, id) = (deps.session_activity.clone(), id.to_string());
+        live_requests.on_change(move |waiting| hub.set_waiting(id.clone(), waiting));
+    }
     let engine = if resumed {
         let harness_len = session.transcript().await.len();
         let agent_lines = deps
@@ -532,6 +541,7 @@ pub async fn build_slot(
         events_tx,
         pending,
         prompt_pending,
+        live_requests,
         runtime_requests,
         message_queue,
         cwd: cwd_lock,

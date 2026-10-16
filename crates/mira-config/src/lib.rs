@@ -146,6 +146,11 @@ pub struct SessionsConfig {
     /// Keep the display and the machine awake while any chat is running.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keep_awake_while_running: Option<bool>,
+    /// When Mira restarts with chats mid-turn, continue them automatically
+    /// (checking what was already done) instead of offering a button.
+    /// Default on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resume_after_restart: Option<bool>,
 }
 
 impl SessionsConfig {
@@ -157,6 +162,9 @@ impl SessionsConfig {
     }
     pub fn keep_awake(&self) -> bool {
         self.keep_awake_while_running.unwrap_or(false)
+    }
+    pub fn resume_after_restart(&self) -> bool {
+        self.resume_after_restart.unwrap_or(true)
     }
 }
 

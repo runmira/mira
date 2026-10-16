@@ -97,7 +97,11 @@ async fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
 /// A worktree for `branch` beside the repository (`<repo>-worktrees/<branch>`),
 /// reused when it already exists. A new branch starts from `base` (default:
 /// the current HEAD).
-async fn ensure_worktree(cwd: &Path, branch: &str, base: Option<&str>) -> Result<PathBuf, String> {
+pub(crate) async fn ensure_worktree(
+    cwd: &Path,
+    branch: &str,
+    base: Option<&str>,
+) -> Result<PathBuf, String> {
     git(cwd, &["check-ref-format", "--branch", branch])
         .await
         .map_err(|_| format!("`{branch}` isn't a valid branch name"))?;

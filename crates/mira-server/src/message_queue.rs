@@ -34,6 +34,10 @@ pub struct QueuedInput {
 /// claiming it uses the same durable, fail-closed delivery receipt as any input.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LimitRecovery {
+    /// Why the task stopped: absent for a usage limit, `restart` when Mira
+    /// stopped mid-turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
     pub created_at: u64,
@@ -378,11 +382,32 @@ impl MessageQueue {
             text: "Continue the interrupted task from where you stopped. Check existing results before repeating any actions.".into(),
             images: vec![], engine, dispatching: false, delivered: false,
             fingerprint: String::new(), error: None,
-            recovery: Some(LimitRecovery { model, created_at: now_ms(), reset_at, scheduled_at: None, snoozed: false }),
+            recovery: Some(LimitRecovery { reason: None, model, created_at: now_ms(), reset_at, scheduled_at: None, snoozed: false }),
         });
         self.commit(&next).await?;
         *guard = next;
         self.changed.notify_one();
+        Ok(())
+    }
+    /// The same inert recovery, for a turn a restart cut off.
+    pub async fn offer_restart_recovery(
+        &self,
+        engine: Option<String>,
+        model: Option<String>,
+    ) -> Result<(), String> {
+        self.offer_recovery(engine, model, None).await?;
+        let mut guard = self.items.lock().await;
+        let mut next = guard.clone();
+        if let Some(r) = next
+            .iter_mut()
+            .rev()
+            .find(|i| !i.dispatching && !i.delivered)
+            .and_then(|i| i.recovery.as_mut())
+        {
+            r.reason = Some("restart".into());
+        }
+        self.commit(&next).await?;
+        *guard = next;
         Ok(())
     }
     pub async fn update_recovery(&self, id: &str, action: &str) -> Result<(), String> {
@@ -789,6 +814,23 @@ pub fn wake(state: &AppState, slot: &Arc<SessionSlot>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_restart_recovery_is_inert_marked_and_survives_reopening() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.queue");
+        let queue = MessageQueue::open(Some(path.clone())).await;
+        queue
+            .offer_restart_recovery(Some("codex".into()), None)
+            .await
+            .unwrap();
+        let reopened = MessageQueue::open(Some(path)).await;
+        let items = reopened.snapshot().await;
+        let r = items[0].recovery.as_ref().expect("a recovery");
+        assert_eq!(r.reason.as_deref(), Some("restart"));
+        assert!(r.scheduled_at.is_none(), "waits for the user's Continue");
+    }
+
     fn item(id: &str) -> QueuedInput {
         QueuedInput {
             id: id.into(),

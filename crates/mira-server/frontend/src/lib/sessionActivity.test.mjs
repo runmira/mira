@@ -12,6 +12,14 @@ test('completion cannot be overwritten by stale running or stale snapshots',()=>
  assert.equal(apply(state,{epoch:'boot',revision:1,session_id:'a',running:true}),state);
  assert.equal(apply(state,snapshot('boot',1,['a','b'])),state);
 });
+test('waiting shares the revision fence and survives running changes',()=>{
+ let state=apply(null,{snapshot:{epoch:'e',revision:1,running:['a'],waiting:['a']}});
+ state=apply(state,{epoch:'e',revision:2,session_id:'a',running:false});
+ assert.deepEqual([...state.waiting],['a']);
+ state=apply(state,{epoch:'e',revision:3,session_id:'a',waiting:false});
+ assert.equal(state.waiting.size,0);
+ assert.equal(apply(state,{epoch:'e',revision:2,session_id:'a',waiting:true}),state);
+});
 test('reconnect and server restart snapshots clear ghosts across every chat',()=>{
  let state=apply(null,snapshot('old',900,['a','b']));
  state=apply(state,snapshot('new',1,[]));assert.equal(state.running.size,0);

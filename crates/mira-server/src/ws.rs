@@ -80,11 +80,9 @@ async fn subscription(
     sequenced: bool,
 ) -> Subscription {
     if !sequenced {
-        return (
-            slot.clone(),
-            slot.events_tx.subscribe(),
-            vec![build_ready(slot, state).await],
-        );
+        let mut initial = vec![build_ready(slot, state).await];
+        initial.extend(slot.live_requests.frames());
+        return (slot.clone(), slot.events_tx.subscribe(), initial);
     }
     let rx = slot.events_tx.subscribe_stream();
     let initial = if let Some((cursor, replay)) = after.and_then(|cursor| {
@@ -101,6 +99,10 @@ async fn subscription(
     } else {
         vec![build_ready(slot, state).await]
     };
+    // Requests the chat is still waiting on go out again: they were sent
+    // once, possibly while no window was on this chat (the client dedupes).
+    let mut initial = initial;
+    initial.extend(slot.live_requests.frames());
     (slot.clone(), rx, initial)
 }
 
@@ -289,9 +291,19 @@ pub(crate) async fn build_ready(slot: &SessionSlot, state: &AppState) -> ServerM
     let transcript_page = crate::transcript_history::page(&sess.id.to_string(), &items, None, 20)
         .expect("initial history page has no cursor");
     let agent_transcript = crate::transcript_history::latest_state(&agent_transcript);
-    let turn_diffs = crate::checkpoints::turn_diffs(&cwd, &sess.id.to_string());
+    // Off the async runtime: turns finished before changes were cached
+    // still run git.
+    let turn_diffs = {
+        let (cwd, id) = (cwd.clone(), sess.id.to_string());
+        tokio::task::spawn_blocking(move || crate::checkpoints::turn_diffs(&cwd, &id))
+            .await
+            .unwrap_or_default()
+    };
     ServerMsg::Ready {
         stream_cursor: Some(stream_cursor),
+        delegated_tasks: crate::delegate::tasks_of(state, &sess.id.to_string()),
+        parent_id: sess.parent_id().map(|p| p.to_string()),
+        live_request_ids: slot.live_requests.ids(),
         queued_inputs: slot.message_queue.snapshot().await,
         session_activity: state.session_activity.snapshot(),
         turn_diffs,
@@ -1849,6 +1861,11 @@ async fn dispatch_on_slot(
                 .send(subscription(&target, state, None, sequenced).await)
                 .await;
         }
+        ClientMsg::DelegateCancel { task_id } => {
+            if let Err(text) = crate::delegate::cancel(state, &slot.id.to_string(), &task_id).await {
+                let _ = slot.events_tx.send(ServerMsg::Error { text });
+            }
+        }
         ClientMsg::SetBackgroundMode { mode } => {
             {
                 let mut guard = slot.background_mode.write().await;
@@ -3213,6 +3230,7 @@ pub(crate) async fn before_prompt(slot: &SessionSlot, text: &str, replaces: Opti
     let id = slot.id.to_string();
     let text = text.to_string();
     let replaces = replaces.map(|(t, n)| (t.to_string(), n));
+    crate::turn_touch::begin(slot, cwd.clone());
     let expired = tokio::task::spawn_blocking(move || {
         crate::session_changes::with_snapshot_budget(std::time::Duration::from_secs(5), || {
             crate::session_changes::ensure_baseline(&cwd, &id);

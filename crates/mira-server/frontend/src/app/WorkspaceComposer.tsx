@@ -12,6 +12,28 @@ import { loadModelOptions } from '../lib/models';
 import { cn } from '../lib/utils';
 import { useAppRuntime } from '../state/RuntimeProvider';
 import type { WorkspaceRuntime } from './WorkspaceRuntime';
+import { useDelegatedTasks } from '../lib/delegatedTasks';
+
+/** On a delegated helper's chat: it runs on its own and reports back to the
+ *  chat that started it, which is one click away. */
+function ParentChatBar({ onOpen }: { onOpen: (id: string) => void }) {
+  const { parentId } = useDelegatedTasks();
+  if (!parentId) return null;
+  return (
+    <div className="mx-auto mb-2 flex w-full max-w-3xl items-center gap-2 rounded-lg border border-border/60 bg-secondary/50 px-3 py-1.5 text-[12.5px]">
+      <span className="min-w-0 flex-1 truncate text-muted-foreground">
+        Delegated task — runs on its own and reports back to the chat that started it
+      </span>
+      <button
+        type="button"
+        onClick={() => onOpen(parentId)}
+        className="shrink-0 rounded px-1.5 py-0.5 text-[12px] font-medium text-foreground/80 hover:bg-fg/[0.06] hover:text-foreground"
+      >
+        Open parent
+      </button>
+    </div>
+  );
+}
 const EMPTY_QUEUE: import('../components/Composer').QueuedComposerMessage[] = [];
 const COMPOSER_FIELDS = [
   'ctxReserve',
@@ -296,6 +318,7 @@ export const WorkspaceComposer = memo(function WorkspaceComposer(
           </button>
         </div>
       )}
+      <ParentChatBar onOpen={attachSession} />
       <Composer
         disabled={status !== 'open'}
         busy={busy}
