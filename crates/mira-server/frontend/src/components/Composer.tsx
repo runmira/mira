@@ -3,7 +3,8 @@ import { cn } from '@/lib/utils';
 import { m } from 'framer-motion';
 import { ArrowUp,Square } from 'lucide-react';
 import { captureScreenshot } from '../lib/screenCapture';
-import { SpendLimitNotice } from './SpendLimitNotice';
+import { lazyNamed } from '../lib/lazy';
+import { LazyBoundary } from './LazyBoundary';
 import { ComposerNoticeStack } from './ComposerNoticeStack';
 import { EnginePicker } from './EnginePicker';
 import { RevertDialog } from './AgentSessionActions';
@@ -32,6 +33,7 @@ import { AttachmentChip } from './composer/attachments';
 import { Props } from './composer/types';
 import { useComposerController } from './composer/useComposerController';
 import { HoverCard } from './ui/hover-card';
+const SpendLimitNotice = lazyNamed(() => import('./SpendLimitNotice'), 'SpendLimitNotice');
 export function Composer(props: Props) {
   const {
     disabled,
@@ -152,7 +154,7 @@ export function Composer(props: Props) {
   const unsupportedImages = agentDriving && images.length > 0 && !agentAcceptsImages(agentConfig);
   return (
     <div className="flex flex-col items-center gap-1.5 px-4 pb-4 pt-2 max-md:px-2 max-md:pb-2">
-      <SpendLimitNotice sessionId={sessionId} busy={busy} />
+      <LazyBoundary fallback={null}><SpendLimitNotice key={sessionId ?? 'unsaved'} sessionId={sessionId} busy={busy} /></LazyBoundary>
       <RevertDialog sessionId={sessionId} open={revertOpen} onOpenChange={setRevertOpen} onReverted={onAgentReverted} />
       {draftError && (
         <p
