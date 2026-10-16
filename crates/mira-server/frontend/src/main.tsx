@@ -1,3 +1,5 @@
+// First: it may rewrite the URL, and the router reads it on import.
+import './lib/authReturn';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { LazyMotion } from 'framer-motion';

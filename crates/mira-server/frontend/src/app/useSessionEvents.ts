@@ -1,3 +1,4 @@
+import { readyShowsChat } from '../lib/readyNavigation';
 import { replayExternalStreams, projectExternalWork, upsertExternalWork } from '../lib/externalSubagents';
 import * as agentTerminal from '../lib/agentTerminal';
 import { getBoolPref,PREF_KEYS } from '../lib/prefs';
@@ -380,11 +381,10 @@ export function useSessionEvents(
         wsRef.current?.send({ type: 'environment' });
         // Fetch git status, session diff, and branch PR for the new cwd.
         refreshRepo();
-        // A Ready frame means the harness swapped session context (new /
-        // load / resume / reconnect). If the user was parked on Plugins
-        // or another management view, jump back to chat so a fresh
-        // transcript actually shows.
-        setMainView('chat');
+        // Opening another chat (new / load / resume) brings a parked view
+        // (Plugins, Work…) back to the transcript. The first ready after a
+        // page load and reconnects don't: the URL's route stands.
+        if (readyShowsChat(previousSession, msg.session_id)) setMainView('chat');
         break;
       }
 
