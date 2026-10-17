@@ -38,7 +38,11 @@ struct Device {
 }
 
 /// Run a tool and return stdout, or its stderr as the error.
-async fn run(program: &PathBuf, args: &[&str], timeout: Duration) -> Result<Vec<u8>, String> {
+pub(super) async fn run(
+    program: &PathBuf,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<Vec<u8>, String> {
     let fut = tokio::process::Command::new(program)
         .args(args)
         .stdin(std::process::Stdio::null())
@@ -82,7 +86,7 @@ pub fn available() -> bool {
     found
 }
 
-fn xcrun() -> Option<PathBuf> {
+pub(super) fn xcrun() -> Option<PathBuf> {
     cfg!(target_os = "macos")
         .then(|| PathBuf::from("/usr/bin/xcrun"))
         .filter(|p| p.exists())
@@ -111,7 +115,7 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
     })
 }
 
-fn adb() -> Option<PathBuf> {
+pub(super) fn adb() -> Option<PathBuf> {
     android_sdk()
         .map(|s| s.join("platform-tools/adb"))
         .filter(|p| p.is_file())

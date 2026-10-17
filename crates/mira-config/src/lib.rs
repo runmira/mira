@@ -90,6 +90,10 @@ pub struct MiraConfig {
     /// or with `--browser`.
     #[serde(default, skip_serializing_if = "BrowserConfig::is_empty")]
     pub browser: BrowserConfig,
+    /// iOS Simulators and Android Emulators in the Device pane. Only read
+    /// from the global file.
+    #[serde(default, skip_serializing_if = "DevicesConfig::is_empty")]
+    pub devices: DevicesConfig,
     /// Where tools execute: the local machine (default) or a sandbox.
     /// Only read from the global file.
     #[serde(default, skip_serializing_if = "ComputeConfig::is_empty")]
@@ -400,6 +404,35 @@ impl ComputerUseConfig {
 
     pub fn enabled(&self) -> bool {
         self.enabled.unwrap_or(false)
+    }
+}
+
+/// `devices:` block. Only read from the global file: a cloned repo must
+/// not be able to start the device hub or hand its agents a simulator.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct DevicesConfig {
+    /// Download (once) and run the device hub that streams simulators and
+    /// emulators into the Device pane. Default off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hub_enabled: Option<bool>,
+    /// Let agents open and drive devices. Needs the hub. Default off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_access: Option<bool>,
+}
+
+impl DevicesConfig {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn hub_enabled(&self) -> bool {
+        self.hub_enabled.unwrap_or(false)
+    }
+
+    /// Agent access only counts while the hub is on.
+    pub fn agent_access(&self) -> bool {
+        self.hub_enabled() && self.agent_access.unwrap_or(false)
     }
 }
 
@@ -1328,6 +1361,17 @@ mod tests {
         let c = MiraConfig::default();
         assert!(c.default_model.is_none());
         assert!(c.providers.is_empty());
+    }
+
+    #[test]
+    fn devices_block_is_global_only() {
+        let local: MiraConfig =
+            serde_yaml::from_str("devices:\n  hub_enabled: true\n  agent_access: true\n").unwrap();
+        let merged = MiraConfig::default().merge(local);
+        assert!(!merged.devices.hub_enabled());
+        assert!(!merged.devices.agent_access());
+        let only_access: DevicesConfig = serde_yaml::from_str("agent_access: true\n").unwrap();
+        assert!(!only_access.agent_access(), "agent access needs the hub");
     }
 
     #[test]

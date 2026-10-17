@@ -238,6 +238,8 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
         .local_addr()
         .map(|a| a.port())
         .unwrap_or(cfg.bind.port());
+    // Bring the device hub back if the user left it on.
+    devices::resume();
 
     // `prompt` hooks ask the small model, on the swappable provider so a
     // settings change reaches them too.
@@ -875,6 +877,7 @@ fn build_router(
         .merge(pairing_routes)
         .merge(remote_routes)
         .merge(computer_routes)
+        .merge(devices::routes())
         .layer(axum::middleware::from_fn_with_state(
             devices,
             pairing::guard,
