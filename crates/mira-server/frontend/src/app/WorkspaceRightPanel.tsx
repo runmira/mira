@@ -7,7 +7,8 @@ import { LazyBoundary } from '../components/LazyBoundary';
 import {
 ActivityPane,
 AsidePane,
-DevicesPane,
+DevicePane,
+ResponsivePane,
 PrPane,
 ProcessesPane,
 SubagentPanel,
@@ -159,7 +160,7 @@ export function WorkspaceRightPanel(
                             selectedProcess={
                               selectedProcess?.session === sessionId ? selectedProcess : undefined
                             }
-                            onPreview={() => openToolPane('devices')}
+                            onPreview={() => openToolPane('responsive')}
                           />
                         );
                       case 'tests':
@@ -177,8 +178,10 @@ export function WorkspaceRightPanel(
                             onOpenFile={(path, preview) => openFileTab(path, preview)}
                           />
                         );
-                      case 'devices':
-                        return <DevicesPane />;
+                      case 'responsive':
+                        return <ResponsivePane />;
+                      case 'device':
+                        return <DevicePane />;
                       case 'pr':
 // Keyed by tab: each PR keeps its own
                         // summary/code selection when switching tabs.

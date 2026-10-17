@@ -64,7 +64,8 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/ws': { target: 'ws://127.0.0.1:8787', ws: true, changeOrigin: true },
-      '/api': { target: 'http://127.0.0.1:8787', changeOrigin: true },
+      // ws: the Device pane's input and Android video sockets live under /api.
+      '/api': { target: 'http://127.0.0.1:8787', changeOrigin: true, ws: true },
     },
   },
   build: {

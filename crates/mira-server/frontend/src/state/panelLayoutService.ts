@@ -30,7 +30,9 @@ export function createPanelLayoutService(storage: UiStorage | undefined, scope: 
       if (value?.version !== 1) return empty();
       const files = Array.isArray(value.files) ? [...new Set(value.files.filter((path: unknown) => typeof path === 'string' && path.length > 0 && path.length < 2048).slice(0,24) as string[])] : [];
       const tools: ToolPaneTab[] = [];
-      for (const candidate of Array.isArray(value.tools) ? value.tools.slice(0,24) : []) {
+      for (const saved of Array.isArray(value.tools) ? value.tools.slice(0,24) : []) {
+        // The viewport preview was the `devices` pane before the live Device pane existed.
+        const candidate = saved?.id === 'tool:devices' ? {...saved,id:'tool:responsive',kind:'responsive',title:'Responsive'} : saved;
         if (!candidate || typeof candidate.id !== 'string') continue;
         const kind = toolPaneKindOf(candidate.id);
         if (!kind || kind === 'new' || kind !== candidate.kind || typeof candidate.title !== 'string') continue;
@@ -40,7 +42,7 @@ export function createPanelLayoutService(storage: UiStorage | undefined, scope: 
       }
       const sources: Record<string,string> = {};
       for (const [id,source] of Object.entries(value.sources ?? {}).slice(-24)) if (typeof source === 'string' && /^turn:\d+$/.test(source)) sources[id] = source;
-      return {width:Number.isFinite(value.width) ? Math.max(280,Math.min(800,value.width)) : 390,files,tools,active:typeof value.active === 'string' ? value.active : null,sources};
+      return {width:Number.isFinite(value.width) ? Math.max(280,Math.min(800,value.width)) : 390,files,tools,active:typeof value.active === 'string' ? (value.active === 'tool:devices' ? 'tool:responsive' : value.active) : null,sources};
     } catch { return empty(); }
   }
   function save() {

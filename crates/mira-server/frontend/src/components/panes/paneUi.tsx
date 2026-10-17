@@ -1,6 +1,7 @@
 /** Small pieces the utility panes share, so they read as one family. */
 import type { ReactNode } from 'react';
 import { cn } from '@/lib/utils';
+import { Tip } from '../ui/Tip';
 
 /** The strip under the tab bar: controls on the left, extras right. */
 export function PaneBar({ children, className }: { children: ReactNode; className?: string }) {
@@ -24,8 +25,10 @@ export function PaneIconButton({
   active,
   tone,
   className,
+  tipAlign = 'center',
 }: {
   children: ReactNode;
+  /** Shown in the app's tooltip and read as the button's name. */
   title: string;
   onClick: () => void;
   disabled?: boolean;
@@ -33,11 +36,13 @@ export function PaneIconButton({
   /** `danger` reddens on hover (Stop, Clear). */
   tone?: 'danger';
   className?: string;
+  /** `end` for buttons near the right edge, so the tip stays in view. */
+  tipAlign?: 'start' | 'center' | 'end';
 }) {
   return (
+    <Tip label={title} side="bottom" align={tipAlign}>
     <button
       type="button"
-      title={title}
       aria-label={title}
       onClick={onClick}
       disabled={disabled}
@@ -53,6 +58,7 @@ export function PaneIconButton({
     >
       {children}
     </button>
+    </Tip>
   );
 }
 

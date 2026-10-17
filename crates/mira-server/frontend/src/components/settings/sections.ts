@@ -6,6 +6,7 @@ import {
   Info,
   Keyboard,
   Monitor,
+  MonitorSmartphone,
   Palette,
   Plug,
   Search,
@@ -15,7 +16,7 @@ import {
   Zap,
 } from 'lucide-react';
 
-export type SettingsSectionId = 'general' | 'appearance' | 'provider' | 'agents' | 'subagents' | 'usage' | 'memory' | 'skills' | 'hooks' | 'keybindings' | 'search' | 'integrations' | 'devices' | 'computer' | 'about';
+export type SettingsSectionId = 'general' | 'appearance' | 'provider' | 'agents' | 'subagents' | 'usage' | 'memory' | 'skills' | 'hooks' | 'keybindings' | 'search' | 'integrations' | 'devices' | 'simulators' | 'computer' | 'about';
 
 /** Section metadata, shared with the Sidebar so it can render the same nav
  *  in its "settings mode" (the settings surface is inline in the main pane,
@@ -46,5 +47,7 @@ export const SETTINGS_SECTIONS: {
   // Phones and other computers paired with this Mira (pairing.rs).
   { id: 'computer',    label: 'Computer',    icon: Monitor },
   { id: 'devices',     label: 'Devices',     icon: Smartphone },
+  // iOS Simulators and Android Emulators in the Device pane (devices/).
+  { id: 'simulators',  label: 'Simulators',  icon: MonitorSmartphone },
   { id: 'about',       label: 'About',       icon: Info },
 ];
