@@ -4,7 +4,7 @@
  * visible one streams. First use goes through setup, which is where the
  * device hub is downloaded.
  */
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft, Camera, Circle, CircleAlert, LayoutGrid, LoaderCircle, Plus, Power, RefreshCw, RotateCw,
   Settings2, Smartphone, SlidersHorizontal, X,
@@ -17,6 +17,7 @@ import { screenshotDevice, type Device, type DeviceList, type DeviceState } from
 import { useDeviceList, useDevicePower, useDeviceSettings, useDeviceState } from './queries';
 import { DeviceSetup } from './DeviceSetup';
 import { InstallProgress } from './InstallProgress';
+import { onDeviceFocus, takePendingFocus } from './focus';
 import { PlatformLogo } from './PlatformLogo';
 import { DeviceStreamView, type DeviceStreamHandle } from './DeviceStreamView';
 import { DeviceToolsDrawer } from './DeviceToolsDrawer';
@@ -93,6 +94,24 @@ function Devices({ state, onSetup }: { state: DeviceState; onSetup: () => void }
   const view = useRef<DeviceStreamHandle | null>(null);
 
   const refresh = () => void listQuery.refetch();
+
+  // An agent opened a device: show it on its own tab once the list has it.
+  const [wanted, setWanted] = useState<string | null>(takePendingFocus);
+  useEffect(() => onDeviceFocus((device) => {
+    takePendingFocus();
+    setWanted(device);
+    void listQuery.refetch();
+  }), [listQuery.refetch]);
+  const found = wanted
+    ? list?.devices.find((d) => d.id === wanted) ??
+      list?.devices.find((d) => d.booted && d.name.toLowerCase() === wanted.toLowerCase())
+    : undefined;
+  if (wanted && found) {
+    setWanted(null);
+    setTabs((prev) => [...prev.filter((t) => t.id !== found.id), { platform: found.platform, id: found.id, name: found.name }]);
+    setActive(found.id);
+    setPicking(false);
+  }
 
   const byId = useMemo(() => new Map((list?.devices ?? []).map((d) => [d.id, d])), [list]);
   const current = active ? byId.get(active) ?? null : null;

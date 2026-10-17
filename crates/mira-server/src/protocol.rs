@@ -894,6 +894,12 @@ pub enum ServerMsg {
     /// An agent used Mira's browser through the tool server. Lets the
     /// client show the browser pane however the agent names its tools.
     BrowserActive,
+    /// An agent opened a simulator or emulator (`device_open`): show it in
+    /// the Device pane. `device` is what the agent named it by, an id or a
+    /// name.
+    DeviceActive {
+        device: String,
+    },
     /// `mira.yaml` changed and the engine registry was rebuilt: refetch
     /// `GET /api/engines`.
     EnginesChanged,

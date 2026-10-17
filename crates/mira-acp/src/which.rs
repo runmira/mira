@@ -31,6 +31,8 @@ use std::sync::OnceLock;
 /// anyone's `PATH`.
 const HOME_BIN_DIRS: &[&str] = &[
     ".local/bin",
+    // Mira's own launchers (`agent-device` while agent device access is on).
+    ".mira/tools/bin",
     ".npm-global/bin",
     ".npm-packages/bin",
     ".bun/bin",

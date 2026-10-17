@@ -1274,7 +1274,18 @@ async fn mcp_one(
             }
             if name.starts_with("device_") {
                 return Some(ok(match crate::devices::call(name, args).await {
-                    Ok(content) => json!({ "content": content, "isError": false }),
+                    Ok(content) => {
+                        if name == "device_open" {
+                            if let (Some(slot), Some(device)) =
+                                (mcp_slot(state, q).await, args["device"].as_str())
+                            {
+                                let _ = slot.events_tx.send(crate::protocol::ServerMsg::DeviceActive {
+                                    device: device.to_string(),
+                                });
+                            }
+                        }
+                        json!({ "content": content, "isError": false })
+                    }
                     Err(e) => {
                         json!({ "content": [{ "type": "text", "text": e }], "isError": true })
                     }

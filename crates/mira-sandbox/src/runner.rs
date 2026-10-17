@@ -56,6 +56,12 @@ fn sandbox_path() -> String {
         }
     }
 
+    // Mira's own launchers (`agent-device` while agent device access is
+    // on). Last, so nothing of the user's is shadowed.
+    if let Some(home) = std::env::var_os("HOME") {
+        add(PathBuf::from(home).join(".mira/tools/bin"));
+    }
+
     std::env::join_paths(paths)
         .expect("failed to construct sandbox PATH")
         .to_string_lossy()

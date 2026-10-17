@@ -1,4 +1,5 @@
 import { applyReviewEvent,emptyReviewState } from '../components/ReviewPanel';
+import { focusDevice } from '../components/device/focus';
 import * as delegatedTasks from '../lib/delegatedTasks';
 import {
 appendDelegateStep,
@@ -21,6 +22,7 @@ export function usePanelEvents(
     | 'setActiveAgentTab'
     | 'updateTranscript'
     | 'setBrowserPing'
+    | 'openToolPane'
   >,
 ) {
   const {
@@ -31,6 +33,7 @@ export function usePanelEvents(
     setActiveAgentTab,
     updateTranscript,
     setBrowserPing,
+    openToolPane,
   } = context;
   return useStableCallback((msg: ServerMsg) => {
     const receivedAt = Date.now();
@@ -194,6 +197,12 @@ export function usePanelEvents(
       case 'browser_active':
         // An agent is driving Mira's browser through the tool server.
         setBrowserPing((n) => n + 1);
+        break;
+
+      case 'device_active':
+        // An agent opened a simulator: show it, on its own tab.
+        openToolPane('device');
+        focusDevice(msg.device);
         break;
 
       case 'html_render':

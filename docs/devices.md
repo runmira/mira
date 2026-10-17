@@ -117,3 +117,19 @@ are under `/api/device-hub`:
   profile or the page isn't a secure context), `input` (binary WebSocket),
   `config`.
 - **Android**: `ws` (SEMU-framed H.264 and JSON gestures on one socket).
+
+## Agents
+
+With agent access on, agents get four MCP tools: `device_list`,
+`device_open`, `device_screenshot` and `device_close`. They're listed only
+while the hub is on, access is allowed and this machine can run a platform.
+`device_open` boots or attaches to a device, shows it in the Device pane
+(`device_active` over `/ws`) and returns how to drive it.
+
+Driving is the `agent-device` command line, not a tool. Mira writes a
+launcher to `~/.mira/tools/bin/agent-device` (Mira's Node, the pinned
+agent-device, and a state directory under `~/.mira/tools`) while access is
+on and deletes it when access is turned off. That directory is on the PATH
+of external agents and of Mira's own shell commands. The first iOS command
+builds agent-device's test runner, about a minute once per machine; no
+`idb` is involved.

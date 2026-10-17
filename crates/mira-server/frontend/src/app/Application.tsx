@@ -90,6 +90,7 @@ export function Application() {
       case 'subagent_scratchpad_note':
       case 'delegate_progress':
       case 'browser_active':
+      case 'device_active':
       case 'html_render':
         panelEvents(msg);
         return;

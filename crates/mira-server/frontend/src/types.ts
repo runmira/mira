@@ -605,6 +605,7 @@ export type ServerMsg =
   | { type: 'acp_unmodelled'; method: string; reason: string }
   /** An agent called one of Mira's browser tools: show the browser pane. */
   | { type: 'browser_active' }
+  | { type: 'device_active'; device: string }
   /** The engine registry was rebuilt from mira.yaml: refetch /api/engines. */
   | { type: 'engines_changed' }
   /** An agent asked for a secret: show a private input. */

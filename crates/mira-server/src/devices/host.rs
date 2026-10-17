@@ -169,6 +169,11 @@ impl DeviceService {
         let this = self.clone();
         tokio::spawn(async move {
             this.refresh_platforms().await;
+            // A launcher left from a run where access was on, then turned off
+            // in mira.yaml, mustn't outlive the setting.
+            if !this.snapshot().agent_access {
+                remove_launcher();
+            }
             if this.snapshot().hub_enabled {
                 this.start().await;
             }
@@ -407,7 +412,11 @@ impl DeviceService {
     // ---- agent tools ----------------------------------------------------
 
     pub async fn ensure_agent_tools(self: &Arc<Self>) {
-        if self.agent_tool.lock().await.is_some() {
+        if let Some((node, tool)) = self.agent_tool().await {
+            // Turned back on: the install is still here, only the launcher went.
+            if let Err(e) = install_launcher(&node, &tool) {
+                tracing::warn!(error = %e, "could not put agent-device on agents' PATH");
+            }
             return;
         }
         let needs_install = toolchain::installed(AGENT_DEVICE).is_none();
@@ -426,8 +435,14 @@ impl DeviceService {
         self.set_progress(true, None);
         match result {
             Ok(tool) => {
-                *self.agent_tool.lock().await = Some(tool);
+                *self.agent_tool.lock().await = Some(tool.clone());
                 let node = self.node.lock().await.clone();
+                if let Some(n) = &node {
+                    if let Err(e) = install_launcher(n, &tool) {
+                        tracing::warn!(error = %e, "could not put agent-device on agents' PATH");
+                    }
+                    warm_daemon(n.clone(), tool);
+                }
                 self.update(|s| {
                     s.agent_tools = AgentTools::Ready;
                     s.agent_detail = None;
@@ -449,6 +464,7 @@ impl DeviceService {
     }
 
     async fn stop_agent_daemon(&self) {
+        remove_launcher();
         let Some((node, tool)) = self.agent_tool().await else {
             return;
         };
@@ -674,6 +690,70 @@ pub fn agent_state_dir() -> PathBuf {
     toolchain::tools_dir().join("agent-device-state")
 }
 
+/// `~/.mira/tools/bin`: on every agent's and shell command's PATH (see
+/// `mira_acp::which` and `mira_sandbox::runner`). It holds the
+/// `agent-device` launcher only while agent access is on.
+pub fn launcher_dir() -> PathBuf {
+    toolchain::tools_dir().join("bin")
+}
+
+fn sh_quote(p: &std::path::Path) -> String {
+    format!("'{}'", p.to_string_lossy().replace('\'', r"'\''"))
+}
+
+/// The launcher script: Mira's Node, the pinned agent-device, and the
+/// state directory its daemon lives in.
+fn launcher_script(node: &Node, tool: &toolchain::Tool) -> String {
+    format!(
+        "#!/bin/sh\n\
+         # Written by Mira while agent device access is on (Settings → Simulators).\n\
+         export AGENT_DEVICE_STATE_DIR={state}\n\
+         export AGENT_DEVICE_NO_UPDATE_NOTIFIER=1\n\
+         exec {node} {entry} \"$@\"\n",
+        state = sh_quote(&agent_state_dir()),
+        node = sh_quote(&node.path),
+        entry = sh_quote(&tool.entry),
+    )
+}
+
+fn install_launcher(node: &Node, tool: &toolchain::Tool) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = launcher_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join("agent-device");
+    // Written beside it and renamed, so a running agent never sees half a file.
+    let tmp = dir.join(".agent-device.tmp");
+    std::fs::write(&tmp, launcher_script(node, tool)).map_err(|e| e.to_string())?;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))
+        .map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
+}
+
+fn remove_launcher() {
+    let _ = std::fs::remove_file(launcher_dir().join("agent-device"));
+}
+
+/// The daemon starts on agent-device's first command and blocks it until
+/// it answers; run a cheap one now so an agent's first call is quick.
+fn warm_daemon(node: Node, tool: toolchain::Tool) {
+    tokio::spawn(async move {
+        let _ = tokio::time::timeout(
+            Duration::from_secs(60),
+            tokio::process::Command::new(&node.path)
+                .arg(&tool.entry)
+                .args(["devices", "--json"])
+                .env("AGENT_DEVICE_STATE_DIR", agent_state_dir())
+                .env("AGENT_DEVICE_NO_UPDATE_NOTIFIER", "1")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .status(),
+        )
+        .await;
+    });
+}
+
 /// Stop a hub a previous Mira left running. Only kills the pid if it is
 /// still a device hub, so a reused pid is left alone.
 async fn reap_stale_hub() {
@@ -881,6 +961,22 @@ mod tests {
         );
         assert_eq!(token_in("Expo Device Hub ready"), None);
         assert_eq!(token_in("token="), None);
+    }
+
+    #[test]
+    fn launcher_quotes_paths_and_pins_the_state_dir() {
+        let node = Node {
+            path: "/tmp/it's here/node".into(),
+            version: "v22.23.3".into(),
+            managed: true,
+        };
+        let tool = toolchain::Tool {
+            entry: "/x/agent-device.mjs".into(),
+        };
+        let script = launcher_script(&node, &tool);
+        assert!(script.starts_with("#!/bin/sh\n"));
+        assert!(script.contains(r#"exec '/tmp/it'\''s here/node' '/x/agent-device.mjs' "$@""#));
+        assert!(script.contains("export AGENT_DEVICE_STATE_DIR='"));
     }
 
     #[test]
