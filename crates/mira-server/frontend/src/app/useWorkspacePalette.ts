@@ -21,6 +21,7 @@ PanelLeftClose,
 Pencil,
 Plug,
 ScanSearch,
+MonitorSmartphone,
 Smartphone,
 Smile,
 Sparkles,
@@ -214,14 +215,25 @@ export function useWorkspacePalette(
       },
     },
     {
-      id: 'devices',
+      id: 'device',
       group: 'View',
-      label: 'Open device preview',
+      label: 'Open device',
       icon: Smartphone,
-      keywords: ['responsive', 'mobile', 'iphone', 'ipad'],
+      keywords: ['simulator', 'emulator', 'ios', 'android', 'iphone', 'mobile'],
       run: () => {
         setMainView('chat');
-        openToolPane('devices');
+        openToolPane('device');
+      },
+    },
+    {
+      id: 'responsive',
+      group: 'View',
+      label: 'Open responsive preview',
+      icon: MonitorSmartphone,
+      keywords: ['responsive', 'breakpoints', 'viewport', 'ipad', 'devices'],
+      run: () => {
+        setMainView('chat');
+        openToolPane('responsive');
       },
     },
     {

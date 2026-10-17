@@ -15,7 +15,8 @@ export const TerminalPanel = lazyNamed(() => import('./components/TerminalPanel'
 // Right-panel panes (rendered inside the lazy SubagentPanel).
 export const AsidePane = lazyNamed(() => import('./components/panes/AsidePane'), 'AsidePane');
 export const ActivityPane = lazyNamed(() => import('./components/panes/ActivityPane'), 'ActivityPane');
-export const DevicesPane = lazyNamed(() => import('./components/panes/DevicesPane'), 'DevicesPane');
+export const ResponsivePane = lazyNamed(() => import('./components/panes/ResponsivePane'), 'ResponsivePane');
+export const DevicePane = lazyNamed(() => import('./components/device/DevicePane'), 'DevicePane');
 export const ProcessesPane = lazyNamed(() => import('./components/panes/ProcessesPane'), 'ProcessesPane');
 export const TestsPane = lazyNamed(() => import('./components/panes/TestsPane'), 'TestsPane');
 export const PrPane = lazyNamed(() => import('./components/panes/PrPane'), 'PrPane');

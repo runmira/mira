@@ -31,7 +31,13 @@ struct Manifest {
     #[serde(rename = "agent-device")]
     agent_device: String,
     node: NodePin,
+    /// Distinct registry requests a fresh install of each pinned tool
+    /// makes, which install progress counts against.
+    progress_units: std::collections::HashMap<String, u32>,
 }
+
+/// Install progress, 0…1, reported as it moves.
+pub type Progress<'a> = &'a (dyn Fn(f32) + Send + Sync);
 
 #[derive(Deserialize)]
 struct NodePin {
@@ -112,7 +118,7 @@ fn install_lock() -> &'static tokio::sync::Mutex<()> {
 }
 
 /// The pinned version of `tool`, installing it first if needed.
-pub async fn ensure(tool: &str, node: &Node) -> Result<Tool, String> {
+pub async fn ensure(tool: &str, node: &Node, progress: Progress<'_>) -> Result<Tool, String> {
     if let Some(t) = installed(tool) {
         return Ok(t);
     }
@@ -125,10 +131,21 @@ pub async fn ensure(tool: &str, node: &Node) -> Result<Tool, String> {
     let target = parent.join(version);
     clear_partial(&parent, &target).await?;
     let staging = staging_dir(&parent).await?;
-    let result = npm_install(node, &staging, &format!("{tool}@{version}")).await;
+    let units = manifest().progress_units.get(tool).copied().unwrap_or(50);
+    let result = npm_install(
+        node,
+        &staging,
+        &format!("{tool}@{version}"),
+        units,
+        progress,
+    )
+    .await;
     let result = match result {
         Ok(()) if tool_at(tool, &staging).entry.is_file() => {
-            commit(&staging, &target, version).await
+            progress(0.97);
+            commit(&staging, &target, version)
+                .await
+                .inspect(|_| progress(1.0))
         }
         Ok(()) => Err(format!("npm finished but {tool} isn't where expected")),
         Err(e) => Err(e),
@@ -190,7 +207,16 @@ async fn prune_other_versions(parent: &Path, keep: &str) {
     }
 }
 
-async fn npm_install(node: &Node, prefix: &Path, spec: &str) -> Result<(), String> {
+/// `npm install` with progress from its http log: each distinct registry
+/// request it makes counts toward the pinned install's known total.
+async fn npm_install(
+    node: &Node,
+    prefix: &Path,
+    spec: &str,
+    units: u32,
+    progress: Progress<'_>,
+) -> Result<(), String> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
     let mut cmd = match std::env::var_os("MIRA_DEVICE_NPM") {
         // Tests stand in a script for npm.
         Some(fake) => tokio::process::Command::new(fake),
@@ -209,27 +235,60 @@ async fn npm_install(node: &Node, prefix: &Path, spec: &str) -> Result<(), Strin
             "--no-fund",
             "--no-audit",
             "--omit=dev",
-            "--loglevel=error",
+            "--loglevel=http",
             spec,
         ])
         // Install scripts (native prebuilds) must find this Node first.
         .env("PATH", node.path_env())
         .env("npm_config_update_notifier", "false")
         .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    let out = tokio::time::timeout(INSTALL_TIMEOUT, cmd.output())
+    let mut child = cmd.spawn().map_err(|e| format!("running npm: {e}"))?;
+    let stderr = child.stderr.take().ok_or("npm has no stderr")?;
+    let run = async {
+        let mut seen = std::collections::HashSet::new();
+        let mut tail = std::collections::VecDeque::with_capacity(8);
+        let mut lines = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if let Some(url) = registry_url(&line) {
+                if seen.insert(url.to_string()) {
+                    // Scripts run after the last request; leave room for them.
+                    progress((seen.len() as f32 / units.max(1) as f32).min(0.9));
+                }
+            } else if !line.trim().is_empty() {
+                if tail.len() == 8 {
+                    tail.pop_front();
+                }
+                tail.push_back(line);
+            }
+        }
+        let status = child
+            .wait()
+            .await
+            .map_err(|e| format!("running npm: {e}"))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "npm install {spec} failed: {}",
+                tail.into_iter().collect::<Vec<_>>().join("\n")
+            ))
+        }
+    };
+    tokio::time::timeout(INSTALL_TIMEOUT, run)
         .await
         .map_err(|_| format!("installing {spec} timed out after 10 minutes"))?
-        .map_err(|e| format!("running npm: {e}"))?;
-    if out.status.success() {
-        return Ok(());
+}
+
+/// The registry URL in an `npm http` log line, whether fetched or cached.
+fn registry_url(line: &str) -> Option<&str> {
+    if !line.starts_with("npm http") {
+        return None;
     }
-    let err = String::from_utf8_lossy(&out.stderr);
-    let tail: Vec<&str> = err.lines().rev().take(6).collect();
-    Err(format!(
-        "npm install {spec} failed: {}",
-        tail.into_iter().rev().collect::<Vec<_>>().join("\n")
-    ))
+    let start = line.find("https://")?;
+    line[start..].split_whitespace().next()
 }
 
 // ---- Node ---------------------------------------------------------------
@@ -404,7 +463,7 @@ pub fn installed_node() -> Option<Node> {
 
 /// A Node to run the tools with: the system's when new enough, otherwise
 /// Mira's pinned download, fetched and checksum-verified on first use.
-pub async fn ensure_node() -> Result<Node, String> {
+pub async fn ensure_node(progress: Progress<'_>) -> Result<Node, String> {
     if let Some(n) = installed_node() {
         return Ok(n);
     }
@@ -424,7 +483,7 @@ pub async fn ensure_node() -> Result<Node, String> {
         .ok_or("no Node build for this platform")?;
     let name = format!("node-v{}-{platform}", pin.version);
     let url = format!("https://nodejs.org/dist/v{}/{name}.tar.gz", pin.version);
-    let bytes = download(&url).await?;
+    let bytes = download(&url, progress).await?;
     let actual = hex(&Sha256::digest(&bytes));
     if &actual != expected {
         return Err(format!(
@@ -473,7 +532,8 @@ pub async fn ensure_node() -> Result<Node, String> {
     })
 }
 
-async fn download(url: &str) -> Result<Vec<u8>, String> {
+async fn download(url: &str, progress: Progress<'_>) -> Result<Vec<u8>, String> {
+    use futures::StreamExt;
     let resp = reqwest::Client::builder()
         .timeout(INSTALL_TIMEOUT)
         .build()
@@ -483,10 +543,16 @@ async fn download(url: &str) -> Result<Vec<u8>, String> {
         .await
         .and_then(|r| r.error_for_status())
         .map_err(|e| format!("downloading Node: {e}"))?;
-    resp.bytes()
-        .await
-        .map(|b| b.to_vec())
-        .map_err(|e| format!("downloading Node: {e}"))
+    let total = resp.content_length().unwrap_or(0);
+    let mut bytes = Vec::with_capacity(total as usize);
+    let mut body = resp.bytes_stream();
+    while let Some(chunk) = body.next().await {
+        bytes.extend_from_slice(&chunk.map_err(|e| format!("downloading Node: {e}"))?);
+        if total > 0 {
+            progress(bytes.len() as f32 / total as f32);
+        }
+    }
+    Ok(bytes)
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -548,7 +614,7 @@ mod tests {
 
         // A failing npm leaves nothing behind that looks installed.
         std::fs::write(tmp.path().join("FAIL"), "").unwrap();
-        assert!(ensure(HUB, &node).await.is_err());
+        assert!(ensure(HUB, &node, &|_| {}).await.is_err());
         assert!(installed(HUB).is_none());
         assert!(!parent.join(version).exists());
         assert!(
@@ -559,7 +625,7 @@ mod tests {
         // Then a good install lands whole, and an old version is pruned.
         std::fs::remove_file(tmp.path().join("FAIL")).unwrap();
         std::fs::create_dir_all(parent.join("0.0.1")).unwrap();
-        let tool = ensure(HUB, &node).await.unwrap();
+        let tool = ensure(HUB, &node, &|_| {}).await.unwrap();
         assert!(tool.entry.is_file());
         assert_eq!(
             std::fs::read_to_string(parent.join(version).join(SENTINEL)).unwrap(),
@@ -601,9 +667,27 @@ mod tests {
     }
 
     #[test]
+    fn counts_registry_requests_from_npm_http_lines() {
+        let fetch = "npm http fetch GET 200 https://registry.npmjs.org/ws/-/ws-8.18.0.tgz 34ms (cache miss)";
+        let cached =
+            "npm http cache ws@https://registry.npmjs.org/ws/-/ws-8.18.0.tgz 0ms (cache hit)";
+        assert_eq!(
+            registry_url(fetch),
+            Some("https://registry.npmjs.org/ws/-/ws-8.18.0.tgz")
+        );
+        assert_eq!(
+            registry_url(cached),
+            registry_url(fetch),
+            "a cache hit counts once"
+        );
+        assert_eq!(registry_url("npm warn deprecated x"), None);
+    }
+
+    #[test]
     fn manifest_pins_every_platform() {
         let m = manifest();
         assert!(!m.hub.is_empty() && !m.agent_device.is_empty());
+        assert!(m.progress_units[HUB] > 0 && m.progress_units[AGENT_DEVICE] > 0);
         for p in ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"] {
             assert_eq!(m.node.sha256[p].len(), 64, "{p}");
         }

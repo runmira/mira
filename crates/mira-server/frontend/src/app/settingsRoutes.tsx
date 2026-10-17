@@ -66,6 +66,11 @@ export const settingsRoute: RouteObject = {
       lazy: () => import('../components/settings/routes/devices'),
     },
     {
+      path: 'simulators',
+      ErrorBoundary: SettingsRouteError,
+      lazy: () => import('../components/settings/routes/simulators'),
+    },
+    {
       path: 'keybindings',
       ErrorBoundary: SettingsRouteError,
       lazy: () => import('../components/settings/routes/keybindings'),

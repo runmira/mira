@@ -1,5 +1,5 @@
 /**
- * Device preview: one page in several viewport sizes side by side — phone,
+ * Responsive preview: one page in several viewport sizes side by side — phone,
  * tablet, laptop — each scaled to fit the pane, reloaded together. For
  * checking a dev server's responsive layout without resizing anything.
  *
@@ -52,7 +52,7 @@ function loadPick(): string[] {
 
 type Port = { port: number; command: string };
 
-export function DevicesPane() {
+export function ResponsivePane() {
   const url = usePreviewUrl();
   const [draft, setDraft] = useState(url);
   const [pick, setPick] = useState<string[]>(loadPick);

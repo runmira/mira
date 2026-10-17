@@ -538,3 +538,26 @@
 }
 .reduce-motion .agent-cursor { transition: none; }
 .reduce-motion .agent-cursor-press, .reduce-motion .agent-cursor-ripple, .reduce-motion .agent-cursor-glow, .reduce-motion .annotation-pin { animation: none; }
+
+/* Install progress with no number yet: a short bar gliding across. */
+@keyframes progress-glide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(250%); }
+}
+.progress-glide {
+  animation: progress-glide 1.4s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+/* The Device pane's phone, breathing while it waits. */
+@keyframes device-breathe {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+.device-breathe {
+  animation: device-breathe 2.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .progress-glide,
+  .device-breathe {
+    animation: none;
+  }
+}

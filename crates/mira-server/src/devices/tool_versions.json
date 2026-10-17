@@ -9,5 +9,9 @@
       "linux-arm64": "5ced2d48d1d7198739b7f86804de0171aefb6823b684b12341d3321afc3cb0b2",
       "linux-x64": "1084aa36196bba4c3a5e69a1ee388a6e4ff729dad09445fbcd434b28fe3c24af"
     }
+  },
+  "progress_units": {
+    "expo-device-hub": 93,
+    "agent-device": 5
   }
 }

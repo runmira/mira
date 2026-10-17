@@ -1,4 +1,4 @@
-import { Activity, Bug, FlaskConical, Globe2, GitPullRequest, MessageCircleQuestion, Pencil, Plus, Smartphone, SquareTerminal } from 'lucide-react';
+import { Activity, Bug, MonitorSmartphone, FlaskConical, Globe2, GitPullRequest, MessageCircleQuestion, Pencil, Plus, Smartphone, SquareTerminal } from 'lucide-react';
 import type { ReactNode } from 'react';
 
 /**
@@ -15,7 +15,8 @@ export type ToolPaneKind =
   | 'new'
   | 'aside'
   | 'browser'
-  | 'devices'
+  | 'device'
+  | 'responsive'
   | 'processes'
   | 'tests'
   | 'activity'
@@ -30,7 +31,8 @@ export const OPENABLE_PANES: ToolPaneKind[] = [
   'diff',
   'aside',
   'browser',
-  'devices',
+  'device',
+  'responsive',
   'processes',
   'tests',
   'activity',
@@ -95,10 +97,15 @@ export const TOOL_PANE_DEFS: Record<
     blurb: 'Ask a question without interrupting',
     icon: <MessageCircleQuestion className="size-3.5" />,
   },
-  devices: {
-    title: 'Devices',
-    blurb: 'Your app on phone, tablet and desktop',
+  device: {
+    title: 'Device',
+    blurb: 'Live iOS Simulator or Android Emulator',
     icon: <Smartphone className="size-3.5" />,
+  },
+  responsive: {
+    title: 'Responsive',
+    blurb: 'Your app at phone, tablet and desktop widths',
+    icon: <MonitorSmartphone className="size-3.5" />,
   },
   processes: {
     title: 'Processes',

@@ -72,10 +72,14 @@ pub struct Versions {
 pub struct DeviceState {
     pub hub: HubStatus,
     pub hub_detail: Option<String>,
+    /// 0…1 while the hub (and Node, if needed) downloads.
+    pub hub_progress: Option<f32>,
     pub hub_enabled: bool,
     pub agent_access: bool,
     pub agent_tools: AgentTools,
     pub agent_detail: Option<String>,
+    /// 0…1 while agent-device downloads.
+    pub agent_progress: Option<f32>,
     pub platforms: Platforms,
     pub versions: Versions,
 }
@@ -236,14 +240,39 @@ impl DeviceService {
         }
     }
 
-    async fn node(&self) -> Result<Node, String> {
+    async fn node(&self, progress: toolchain::Progress<'_>) -> Result<Node, String> {
         let mut slot = self.node.lock().await;
         if let Some(n) = slot.as_ref() {
             return Ok(n.clone());
         }
-        let n = toolchain::ensure_node().await?;
+        let n = toolchain::ensure_node(progress).await?;
         *slot = Some(n.clone());
         Ok(n)
+    }
+
+    /// Whether getting Node means downloading it, so one progress bar can
+    /// cover that and the install after it.
+    async fn node_download_ahead(&self) -> bool {
+        self.node.lock().await.is_none()
+            && toolchain::installed_node().is_none()
+            && toolchain::system_node().await.is_none()
+    }
+
+    /// Progress at 1% steps, so the event stream isn't flooded.
+    fn set_progress(&self, agent: bool, value: Option<f32>) {
+        let value = value.map(|v| (v.clamp(0.0, 1.0) * 100.0).round() / 100.0);
+        self.update(|s| {
+            let slot = if agent {
+                &mut s.agent_progress
+            } else {
+                &mut s.hub_progress
+            };
+            // Never step backwards within one install.
+            *slot = match (*slot, value) {
+                (Some(old), Some(new)) if new < old => Some(old),
+                (_, v) => v,
+            };
+        });
     }
 
     async fn start_inner(self: &Arc<Self>) -> Result<(), String> {
@@ -256,11 +285,34 @@ impl DeviceService {
             };
             s.hub_detail = needs_install.then(|| "Installing device hub…".into());
         });
-        let node = self.node().await?;
-        let tool = toolchain::ensure(HUB, &node).await?;
+        // Node's download, when there is one, fills the first third.
+        let node_share = if needs_install && self.node_download_ahead().await {
+            0.35
+        } else {
+            0.0
+        };
+        if needs_install {
+            self.set_progress(false, Some(0.0));
+        }
+        if node_share > 0.0 {
+            self.update(|s| s.hub_detail = Some("Downloading Node…".into()));
+        }
+        let node = self
+            .node(&|f| self.set_progress(false, Some(f * node_share)))
+            .await
+            .inspect_err(|_| self.set_progress(false, None))?;
+        if needs_install {
+            self.update(|s| s.hub_detail = Some("Installing device hub…".into()));
+        }
+        let tool = toolchain::ensure(HUB, &node, &|f| {
+            self.set_progress(false, Some(node_share + f * (1.0 - node_share)))
+        })
+        .await
+        .inspect_err(|_| self.set_progress(false, None))?;
         self.update(|s| {
             s.hub = HubStatus::Starting;
             s.hub_detail = None;
+            s.hub_progress = None;
             s.versions = versions(Some(&node));
         });
         self.refresh_platforms().await;
@@ -309,7 +361,7 @@ impl DeviceService {
                     restarts.push(Instant::now());
                     self.update(|s| s.hub = HubStatus::Starting);
                     let respawned = async {
-                        let node = self.node().await?;
+                        let node = self.node(&|_| {}).await?;
                         let tool = toolchain::installed(HUB).ok_or("the device hub install is missing")?;
                         spawn_hub(&node, &tool).await
                     }
@@ -363,13 +415,15 @@ impl DeviceService {
             self.update(|s| {
                 s.agent_tools = AgentTools::Installing;
                 s.agent_detail = Some("Installing agent tools…".into());
+                s.agent_progress = Some(0.0);
             });
         }
         let result = async {
-            let node = self.node().await?;
-            toolchain::ensure(AGENT_DEVICE, &node).await
+            let node = self.node(&|_| {}).await?;
+            toolchain::ensure(AGENT_DEVICE, &node, &|f| self.set_progress(true, Some(f))).await
         }
         .await;
+        self.set_progress(true, None);
         match result {
             Ok(tool) => {
                 *self.agent_tool.lock().await = Some(tool);

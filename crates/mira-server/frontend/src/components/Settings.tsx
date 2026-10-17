@@ -219,7 +219,7 @@ export function SettingsSurface() {
         </div>
       </div>
 
-      {view && section !== 'computer' && (
+      {view && section !== 'computer' && section !== 'simulators' && (
         <div className="flex shrink-0 items-center justify-between border-t border-border/60 px-6 py-3">
           <div className="text-[11.5px] text-muted-foreground">
             {saveError ? (
