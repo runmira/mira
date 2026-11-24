@@ -1,4 +1,5 @@
 import { useMemo } from 'react';
+import { parseComposerCitations } from '../lib/sourceCitations';
 import { GithubRef } from './GithubRef';
 import { SessionRef } from './SessionRef';
 import { LinkRef } from './RichRefs';
@@ -30,6 +31,7 @@ import { parseGithubRef } from '../lib/githubRefs';
 /** One recognised run of a sent message. */
 export type UserSegment =
   | { kind: 'text'; text: string }
+  | { kind: 'citation'; href: string; label: string }
   | { kind: 'skill'; name: string }
   | { kind: 'link'; href: string }
   | { kind: 'session'; id: string }
@@ -114,7 +116,12 @@ export function segmentUserText(text: string): UserSegment[] {
   // Odd indices are the captured code spans; even ones are prose.
   text.split(CODE_SPLIT).forEach((part, i) => {
     if (i % 2 === 1) pushText(out, part);
-    else tokenizeProse(part, out);
+    else {
+      for (const segment of parseComposerCitations(part)) {
+        if (segment.kind === 'text') tokenizeProse(segment.text, out);
+        else out.push({ kind: 'citation', href: segment.raw.slice(segment.raw.indexOf('](') + 2, -1), label: segment.label });
+      }
+    }
   });
   return out;
 }
@@ -138,6 +145,8 @@ export function UserRichText({
     <>
       {segments.map((seg, i) => {
         switch (seg.kind) {
+          case 'citation':
+            return <a key={i} href={seg.href} className="text-mira-blue underline underline-offset-2" title="Show quoted passage">{seg.label}</a>;
           case 'skill':
             // An unknown skill still renders as a chip: the token is
             // what fires the skill, whether or not the roster knows it.

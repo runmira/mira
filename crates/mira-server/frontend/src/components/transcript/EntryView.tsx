@@ -749,12 +749,12 @@ export function UserMessage({
   }
 
   return (
-    <div className="group/msg flex max-w-[78%] flex-col items-end">
+    <div className="group/msg flex min-w-0 max-w-[78%] flex-col items-end">
       {/* The sent message gets the same card treatment as the composer:
           a white, softly-shadowed card in light mode (and the filled
           bubble it always was in dark). One card language for "your
           words" wherever they sit in the UI. */}
-      <div className="whitespace-pre-wrap break-words rounded-2xl rounded-br-md border border-border/60 elev-card dark:bg-secondary px-4 py-2.5 text-[14.5px]">
+      <div className="min-w-0 max-w-full whitespace-pre-wrap break-words [overflow-wrap:anywhere] rounded-2xl rounded-br-md border border-border/60 elev-card dark:bg-secondary px-4 py-2.5 text-[14.5px]">
         {children}
       </div>
       <div className="mt-1 flex items-center gap-0.5 opacity-0 transition-opacity group-hover/msg:opacity-100 focus-within:opacity-100">
