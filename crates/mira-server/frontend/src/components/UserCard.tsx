@@ -1,6 +1,5 @@
 import { useState } from 'react';
-import { ChevronUp, LogOut, SlidersHorizontal, UserRound } from 'lucide-react';
-import { getSupabase } from '../lib/supabase';
+import { ChevronUp, SlidersHorizontal, UserRound } from 'lucide-react';
 import { avatarUrl, displayName as oauthDisplayName, initials, useCurrentUser } from '../lib/useCurrentUser';
 import { useProfile } from '../lib/useProfile';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
@@ -25,31 +24,17 @@ export function UserCard({
   const user = useCurrentUser();
   const { profile } = useProfile();
   const [open, setOpen] = useState(false);
-  const [signingOut, setSigningOut] = useState(false);
 
   // Prefer the name the user chose in onboarding; fall back to OAuth-provided
   // name (Google / GitHub) if the profile hasn't been read yet or is empty.
   const oauthName = oauthDisplayName(user);
   // Until the profile or sign-in says who this is, say so plainly rather
   // than showing initials of nothing ("??").
-  const name = profile?.fullName?.trim() || oauthName.trim() || 'Your account';
+  const name = profile?.fullName?.trim() || oauthName.trim() || 'Local workspace';
   const known = name !== 'Your account';
   const workspace = workspaceLabel(profile, name);
   const avatar = avatarUrl(user);
   const mono = known ? initials(name) : null;
-
-  async function signOut() {
-    setSigningOut(true);
-    try {
-      const supabase = getSupabase();
-      if (supabase) await supabase.auth.signOut();
-      // AuthGate's onAuthStateChange listener flips us back to the login
-      // screen — no explicit navigation needed.
-    } finally {
-      setSigningOut(false);
-      setOpen(false);
-    }
-  }
 
   return (
     // The account button, with updates at the far right of the row.
@@ -60,7 +45,7 @@ export function UserCard({
           type="button"
           // The menu's main item is Settings; start fetching it now.
           {...preloadOnIntent(SettingsSurface.preload)}
-          title={`Account: settings and log out · ${connectionLabel(status)}`}
+          title={`Account: settings · ${connectionLabel(status)}`}
           className="flex min-w-0 flex-1 items-center gap-2.5 py-2.5 pl-3 pr-1 text-left"
         >
           <span className="relative shrink-0">
@@ -97,14 +82,6 @@ export function UserCard({
             }}
           >
             Settings
-          </MenuItem>
-          <MenuItem
-            icon={<LogOut className="size-3.5" />}
-            onClick={() => void signOut()}
-            disabled={signingOut}
-            danger
-          >
-            {signingOut ? 'Signing out…' : 'Log out'}
           </MenuItem>
         </div>
       </PopoverContent>

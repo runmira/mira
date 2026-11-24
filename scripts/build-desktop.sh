@@ -22,8 +22,6 @@
 #
 # Needs: node/npm, the Tauri CLI (`cargo install tauri-cli --version "^2"`),
 # and on Linux the WebKitGTK dev packages (see docs/desktop.md).
-# The web UI needs VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY,
-# from the environment or crates/mira-server/frontend/.env.
 set -euo pipefail
 
 MODE=release

@@ -1,10 +1,3 @@
-/**
- * The Runmira-bot GitHub App, through the `github-app` Supabase edge function
- * (see `supabase/functions/github-app`). The function holds the app's
- * private key; Mira only ever gets short-lived tokens for one repository.
- */
-import { getSupabase } from './supabase';
-
 export type AppStatus = { configured: boolean; slug: string | null };
 
 export type AppRepo = {
@@ -24,31 +17,8 @@ export type AppInstallation = {
 
 export type AppInstallations = { installations: AppInstallation[]; manage_url: string };
 
-function base(): string | null {
-  const url = import.meta.env.VITE_SUPABASE_URL as string | undefined;
-  return url ? `${url.replace(/\/+$/, '')}/functions/v1/github-app` : null;
-}
-
-export function githubAppAvailable(): boolean {
-  return base() !== null && getSupabase() !== null;
-}
-
-async function call<T>(path: string, init: RequestInit = {}, auth = true): Promise<T> {
-  const root = base();
-  if (!root) throw new Error('Supabase isn’t configured for this build.');
-  const headers: Record<string, string> = { ...(init.headers as Record<string, string> ?? {}) };
-  if (init.body) headers['content-type'] = 'application/json';
-  if (auth) {
-    const { data } = await getSupabase()!.auth.getSession();
-    const token = data.session?.access_token;
-    if (!token) throw new Error('Sign in to Mira first.');
-    headers.authorization = `Bearer ${token}`;
-  }
-  const r = await fetch(`${root}${path}`, { ...init, headers });
-  const body = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(body?.error ?? `GitHub app ${path}: ${r.status}`);
-  return body as T;
-}
+export function githubAppAvailable(): boolean { return false; }
+async function call<T>(_path: string, _init: RequestInit = {}, _auth = true): Promise<T> { throw new Error('Hosted GitHub App integration is unavailable. Use a GitHub token.'); }
 
 export const appStatus = () => call<AppStatus>('/status', {}, false);
 

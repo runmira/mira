@@ -43,11 +43,7 @@ Debian/Ubuntu:
 sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev
 ```
 
-The web UI reads `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY`
-at build time, from the environment or
-`crates/mira-server/frontend/.env.local` (gitignored). Restart/rebuild after
-changing these values. Use the project URL and publishable key, not a service-role
-key.
+Mira opens locally without an account.
 
 Then, from the repo root:
 
@@ -74,23 +70,6 @@ MIRA_BIN=$PWD/target/debug/mira cargo run --manifest-path apps/desktop/Cargo.tom
 
 `apps/desktop` is its own Cargo workspace, so `cargo build --workspace`
 at the root still needs no GUI libraries.
-
-## One-time setup: Supabase redirect URL
-
-In the Supabase dashboard, under **Authentication → URL Configuration →
-Redirect URLs**, add:
-
-```
-mira://auth-callback
-```
-
-Without it, Supabase sends the browser back to the site URL instead of to
-the app.
-
-On macOS, `mira://` links only reach the app once it's installed as a
-bundle (for example, moved to `/Applications`), not when it runs through
-`cargo tauri dev`. On Windows and Linux, the app registers the scheme
-when it starts.
 
 ## Not done yet
 

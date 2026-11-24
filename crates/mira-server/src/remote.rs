@@ -1,7 +1,7 @@
 //! Remote access: make this computer's Mira reachable from the user's phone
 //! at a stable `https://m-….runmira.dev`, with no networking setup.
 //!
-//! The runmira backend (supabase/functions/remote-access) owns the
+//! The runmira backend (hosted service/functions/remote-access) owns the
 //! Cloudflare side: it creates a tunnel and hostname for this (user,
 //! computer) and hands back a connector token. This module runs Cloudflare's
 //! connector, `cloudflared`, with that token. The connector dials out to

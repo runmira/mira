@@ -16,7 +16,6 @@ name: Desktop release
 #   APPLE_ID, APPLE_TEAM_ID     the developer account
 #   APPLE_PASSWORD              an app-specific password for notarization
 #   TAURI_SIGNING_PRIVATE_KEY(_PASSWORD)  signs in-app updates
-#   VITE_SUPABASE_URL, VITE_SUPABASE_PUBLISHABLE_KEY  the web UI's sign-in
 #
 # Besides the release itself, each run refreshes the channel's update feed
 # in the `desktop-updates` release (alpha.json, beta.json, stable.json),
@@ -133,8 +132,6 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
-          VITE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.VITE_SUPABASE_PUBLISHABLE_KEY }}
         run: >-
           scripts/build-desktop.sh
           --channel "${{ steps.meta.outputs.channel }}"

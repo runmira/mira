@@ -320,16 +320,6 @@ cmd_ci_secrets() {
   else
     say "no updater key yet (scripts/macos-signing.sh updater-key): CI builds won't offer in-app updates"
   fi
-  # The web UI's sign-in settings, from the frontend's local env file.
-  local env_file="$ROOT/crates/mira-server/frontend/.env.local" name value
-  for name in VITE_SUPABASE_URL VITE_SUPABASE_PUBLISHABLE_KEY; do
-    value="$(sed -n "s/^$name=//p" "$env_file" 2>/dev/null | tail -1)"
-    if [ -n "$value" ]; then
-      printf '%s' "$value" | gh secret set "$name" -R "$repo"
-    else
-      say "$name not found in $env_file: set it with gh secret set $name"
-    fi
-  done
   ok "secrets set on $repo"
 }
 

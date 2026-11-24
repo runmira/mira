@@ -740,7 +740,7 @@ fly secrets set \
 ```
 
 Add a managed Postgres via `fly postgres create` or point at Neon /
-Supabase — anything with `postgres://` works.
+hosted service — anything with `postgres://` works.
 
 ### 9.2 Cloudflare Workers + Neon
 

@@ -183,7 +183,7 @@ fn token_patterns() -> &'static [Regex] {
             // GitHub tokens.
             r"\bgh[pousr]_[A-Za-z0-9]{20,}",
             r"\bgithub_pat_[A-Za-z0-9_]{20,}",
-            // GitLab, Slack, Google, AWS, Hugging Face, Tavily, E2B, Supabase.
+            // GitLab, Slack, Google, AWS, Hugging Face, Tavily, E2B, hosted service.
             r"\bglpat-[A-Za-z0-9_\-]{16,}",
             r"\bxox[abposr]-[A-Za-z0-9\-]{10,}",
             r"\bxapp-[A-Za-z0-9\-]{10,}",
@@ -193,7 +193,7 @@ fn token_patterns() -> &'static [Regex] {
             r"\btvly-[A-Za-z0-9\-]{16,}",
             r"\be2b_[A-Za-z0-9]{20,}",
             r"\bsbp_[A-Za-z0-9]{20,}",
-            // JWTs (OAuth access tokens, Supabase keys).
+            // JWTs (OAuth access tokens, hosted service keys).
             r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}",
             // PEM private keys, whole block.
             r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----",

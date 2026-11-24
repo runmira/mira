@@ -144,7 +144,7 @@ export function desktopChannel(): Channel {
 }
 
 /** Where the system browser sends the user after sign-in. Every channel's
- *  scheme must be listed in the Supabase project's allowed redirect URLs. */
+ *  scheme must be listed in the hosted service project's allowed redirect URLs. */
 export function desktopAuthRedirect(): string {
   const channel = desktopChannel();
   return `${channel === 'stable' ? 'mira' : `mira-${channel}`}://auth-callback`;

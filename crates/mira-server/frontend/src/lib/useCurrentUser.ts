@@ -1,38 +1,5 @@
-import { useEffect, useState } from 'react';
-import type { User } from '@supabase/supabase-js';
-import { getSupabase } from './supabase';
-
-/**
- * Subscribes to the current Supabase user. Prefers `getUser()` for the
- * initial read (server-validated) and swaps in the local session on later
- * `onAuthStateChange` events for snappy sign-in / sign-out updates.
- */
-export function useCurrentUser(): User | null {
-  const [user, setUser] = useState<User | null>(null);
-
-  useEffect(() => {
-    const supabase = getSupabase();
-    if (!supabase) return;
-
-    let cancelled = false;
-
-    supabase.auth.getUser().then(({ data }) => {
-      if (cancelled) return;
-      setUser(data.user ?? null);
-    });
-
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
-      setUser(session?.user ?? null);
-    });
-
-    return () => {
-      cancelled = true;
-      sub.subscription.unsubscribe();
-    };
-  }, []);
-
-  return user;
-}
+type User = { id: string; email?: string; user_metadata?: Record<string, unknown> };
+export function useCurrentUser(): User | null { return null; }
 
 /** Best-effort display name from OAuth metadata, falling back to email local-part. */
 export function displayName(user: User | null): string {
